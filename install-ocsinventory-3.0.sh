@@ -6,7 +6,7 @@
 # (tag 3.0.0-rc1) em um UNICO servidor de testes/laboratorio.
 #
 # Suporta duas familias de distribuicao, detectadas automaticamente:
-#   - Debian:  Ubuntu 22.04/24.04, Debian 12/13 (apt/apt, ufw)
+#   - Debian:  Ubuntu 22.04/24.04, Debian 12/13 (apt/apt-get, ufw)
 #   - RHEL:    RHEL 8/9, Rocky Linux, AlmaLinux, Fedora (dnf/yum, firewalld,
 #              com ajustes de SELinux quando ele estiver enforcing/permissive)
 #
@@ -65,7 +65,7 @@ ID=""
 ID_LIKE=""
 PRETTY_NAME=""
 PKG_FAMILY=""   # "debian" ou "rhel", definido por detect_os()
-PKG_MGR=""      # "apt", "dnf" ou "yum", definido por detect_os()
+PKG_MGR=""      # "apt-get", "dnf" ou "yum", definido por detect_os()
 CURRENT_STEP=""
 
 STEP_ORDER=()
@@ -177,9 +177,9 @@ detect_os() {
   . /etc/os-release
   info "Sistema detectado: ${PRETTY_NAME:-desconhecido}"
 
-  if command -v apt &>/dev/null; then
+  if command -v apt-get &>/dev/null; then
     PKG_FAMILY="debian"
-    PKG_MGR="apt"
+    PKG_MGR="apt-get"
   elif command -v dnf &>/dev/null; then
     PKG_FAMILY="rhel"
     PKG_MGR="dnf"
@@ -187,7 +187,7 @@ detect_os() {
     PKG_FAMILY="rhel"
     PKG_MGR="yum"
   else
-    die "Nao foi possivel identificar um gerenciador de pacotes suportado (apt, dnf ou yum) neste sistema."
+    die "Nao foi possivel identificar um gerenciador de pacotes suportado (apt-get, dnf ou yum) neste sistema."
   fi
 
   case "${ID:-}" in
@@ -324,21 +324,29 @@ apt_wait_lock() {
 
 apt_install() {
   apt_wait_lock
-  retry 3 5 env DEBIAN_FRONTEND=noninteractive apt install -y "$@"
+  retry 3 5 env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
 }
 
 install_base_packages() {
   case "$PKG_FAMILY" in
     debian)
       apt_wait_lock
-      retry 3 5 apt update -y
-      apt_install build-essential curl wget git unzip software-properties-common \
+      retry 3 5 apt-get update -y
+      # Nota: software-properties-common foi removido do Debian 13/trixie
+      # (sem previsao de retorno) e por isso NAO entra aqui -- ele so e
+      # necessario no ramo especifico do Ubuntu (deadsnakes PPA), onde e
+      # instalado separadamente dentro de ensure_python312().
+      # sudo: instalacoes minimas do Debian (netinst sem tasksel padrao,
+      # imagens de container/cloud) frequentemente NAO o incluem por
+      # padrao -- e o script inteiro depende de "sudo -u" para rodar
+      # comandos como o usuario "ocs" e como "postgres".
+      apt_install sudo build-essential curl wget git unzip \
         ca-certificates gnupg lsb-release python3 nginx ufw psmisc iproute2
       ;;
     rhel)
       pkg_install epel-release || warn "Nao foi possivel instalar epel-release (normal em Fedora, que ja inclui tudo); seguindo."
       pkg_install dnf-plugins-core || true
-      pkg_install gcc gcc-c++ make curl wget git unzip ca-certificates gnupg2 \
+      pkg_install sudo gcc gcc-c++ make curl wget git unzip ca-certificates gnupg2 \
         python3 nginx firewalld psmisc iproute
       pkg_install policycoreutils-python-utils || \
         warn "Nao foi possivel instalar policycoreutils-python-utils (semanage); se o SELinux estiver enforcing, os ajustes automaticos de contexto serao pulados."
@@ -447,7 +455,7 @@ ensure_python312() {
       if [ "${ID:-}" = "ubuntu" ]; then
         apt_install software-properties-common
         add-apt-repository -y ppa:deadsnakes/ppa || true
-        retry 3 5 apt update -y || true
+        retry 3 5 apt-get update -y || true
       fi
       if apt_install python3.12 python3.12-venv python3.12-dev; then
         PYTHON_BIN=$(command -v python3.12)
