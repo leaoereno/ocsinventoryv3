@@ -126,6 +126,12 @@ Ao final, o script testa `http://127.0.0.1:<porta>/api-check/` (backend) e `http
 - Motor de extensão/plugins completo, CVE e Green IT estão previstos para 3.1/3.2, fora do escopo desta versão.
 - Testado de ponta a ponta em Ubuntu 24.04, AlmaLinux 10 e Debian 13; outras distros das mesmas famílias devem funcionar mas não foram validadas com a mesma profundidade.
 
+## Licença
+
+Este script é distribuído sob a licença **MIT**. Sinta-se livre para fazer fork, modificar, redistribuir e adaptar da maneira que quiser — para uso pessoal, comercial ou dentro de qualquer outro projeto — desde que o aviso de copyright e a licença original sejam mantidos. Não há garantia de funcionamento; use por sua conta e risco, especialmente em ambientes de produção.
+
+O texto completo está no arquivo [`LICENSE`](./LICENSE).
+
 ## Referências
 
 - Backend: `github.com/OCSInventory-NG/OCSInventory-Server-Backend-Rework` (tag `3.0.0-rc1`)
