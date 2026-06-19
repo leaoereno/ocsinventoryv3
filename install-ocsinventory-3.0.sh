@@ -1585,6 +1585,29 @@ print_db_role_summary() {
 # de seguir com a instalacao do backend/frontend.
 #############################################
 setup_app_role_db_connection() {
+  # Se --db-engine nao foi passado via flag, pergunta aqui -- evita o
+  # problema comum de escolher [5] Aplicacao no menu e o script assumir
+  # MySQL quando o banco e PostgreSQL.
+  if [ -z "$DB_ENGINE_CHOICE" ] || [ "$DB_ENGINE_CHOICE" = "mysql" ]; then
+    if [ -z "$DB_ENGINE_CHOICE" ] && [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ]; then
+      cat <<'EOF'
+
+Qual o motor do banco de dados remoto?
+  [1] MySQL / MariaDB
+  [2] PostgreSQL
+EOF
+      local choice
+      read -r -p "Escolha [1/2]: " choice
+      case "$choice" in
+        1) DB_ENGINE_CHOICE="mysql" ;;
+        2) DB_ENGINE_CHOICE="postgresql" ;;
+        *) die "Opcao invalida." ;;
+      esac
+    elif [ -z "$DB_ENGINE_CHOICE" ]; then
+      DB_ENGINE_CHOICE="mysql"
+    fi
+  fi
+
   case "$DB_ENGINE_CHOICE" in
     mysql)
       DB_HOST=$(ask_input "Host do banco de dados (MySQL/MariaDB)" "${DB_HOST:-lnxdcocsdb01}")
