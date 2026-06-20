@@ -29,6 +29,7 @@ Script de instalação do **OCS Inventory 3.0** (tag `3.0.0-rc1`), com suporte a
 15. [Limitações conhecidas](#15-limitações-conhecidas)
 16. [Licença](#16-licença)
 17. [Referências](#17-referências)
+18. [Instalação do Agente nos Endpoints](#18-instalação-do-agente-nos-endpoints)
 
 ---
 
@@ -720,3 +721,152 @@ O texto completo está no arquivo [`LICENSE`](./LICENSE).
 - Agente: `github.com/OCSInventory-NG/OCSInventory-Agent-Rework` (tag `3.0.0-rc1`)
 - SNMP Scanner: `github.com/OCSInventory-NG/OCSInventory-SNMP-Scanner` (tag `3.0.0-rc1`)
 - Pacotes oficiais: `github.com/OCSInventory-NG/OCSInventory-Server-Packages`
+
+---
+
+## 18. Instalação do Agente nos Endpoints
+
+O repositório inclui dois scripts dedicados para instalar o agente OCS Inventory nos endpoints inventariados — separados do instalador do servidor, mais leves e portáveis.
+
+### Scripts disponíveis
+
+| Script | Sistema | Arquivo |
+|---|---|---|
+| Linux / Unix | Todas as distros suportadas | `install-ocsinventory-agent.sh` |
+| Windows | Windows 7 SP1+ / Server 2008 R2+ | `install-ocsinventory-agent.bat` |
+
+### Distros suportadas (Linux)
+
+| Família | Exemplos |
+|---|---|
+| Debian | Ubuntu, Mint, Kali, Raspbian, Pop!_OS |
+| RHEL | AlmaLinux, Rocky, Fedora, CentOS, Amazon Linux |
+| SUSE | openSUSE, SLES |
+| Arch | Arch Linux, Manjaro, EndeavourOS |
+| Alpine | Alpine Linux |
+| Slackware | Slackware |
+
+### Credenciais de registro do agente
+
+Os scripts usam uma **conta de serviço dedicada** para registrar os agentes no backend, sem expor a senha do administrador:
+
+| Campo | Valor |
+|---|---|
+| Usuário | `ocsagentes` |
+| Grupo | `admin` (permissão de envio de inventário, sem acesso administrativo completo) |
+
+A senha está embutida nos scripts. Para alterar, edite as linhas no topo de cada arquivo:
+
+```sh
+# Linux (install-ocsinventory-agent.sh)
+ADMIN_USER="ocsagentes"
+ADMIN_PASS="PSWAgente"
+```
+
+```bat
+:: Windows (install-ocsinventory-agent.bat)
+set "ADMIN_USER=ocsagentes"
+set "ADMIN_PASS=PSWAgente"
+```
+
+### Uso — Linux
+
+```bash
+# Tornar executável
+chmod +x install-ocsinventory-agent.sh
+
+# Interativo (só pergunta a URL do backend)
+sudo ./install-ocsinventory-agent.sh
+
+# Silencioso (sem nenhuma pergunta)
+sudo ./install-ocsinventory-agent.sh --url http://10.24.22.90:8000
+
+# Forçar reinstalação mesmo se a versão já for igual
+sudo ./install-ocsinventory-agent.sh --url http://10.24.22.90:8000 --force
+```
+
+**Flags disponíveis:**
+
+| Flag | Padrão | Descrição |
+|---|---|---|
+| `--url URL` | perguntado | URL completa do backend (`http://IP:8000`) |
+| `--tag TAG` | `3.0.0-rc1` | Tag git do agente a instalar |
+| `--base DIR` | `/opt/ocsinventory` | Diretório base de instalação |
+| `--no-service` | — | Instalar só o binário, sem serviço systemd |
+| `--force` | — | Reinstalar mesmo se a versão já for a desejada |
+
+### Uso — Windows
+
+```bat
+:: Interativo (só pergunta a URL)
+install-ocsinventory-agent.bat
+
+:: Silencioso
+install-ocsinventory-agent.bat http://10.24.22.90:8000
+
+:: Forçar reinstalação
+install-ocsinventory-agent.bat http://10.24.22.90:8000 /force
+```
+
+> Deve ser executado como **Administrador** (botão direito → "Executar como administrador").
+
+### Lógica de atualização (upgrade automático)
+
+Ambos os scripts detectam se já existe uma versão instalada e tomam a decisão correta automaticamente:
+
+| Situação | Ação |
+|---|---|
+| Nenhuma versão instalada | Instalação limpa direta |
+| Versão instalada **diferente** da desejada | Remove a anterior automaticamente e instala a nova |
+| Versão instalada **igual** à desejada | Pergunta se quer reinstalar (ou `--force` / `/force` para pular) |
+
+**O que é removido na desinstalação da versão anterior:**
+- Serviço do sistema (`systemctl stop` + `sc delete` no Windows)
+- Binários em todos os caminhos conhecidos
+- Arquivos de configuração
+- Código-fonte compilado (será reclonado)
+- Entradas de registro (Windows) e entradas do PATH
+
+### Fluxo completo do script Linux
+
+```
+1. Detectar família da distro
+2. Instalar dependências base (git, curl, unzip)
+3. Verificar versão instalada → remover se necessária
+4. Instalar Dart SDK (via repositório oficial ou download standalone)
+5. Perguntar URL do backend (se não passada via --url)
+6. Clonar / atualizar repositório do agente (tag 3.0.0-rc1)
+7. Compilar: dart compile exe lib/app/app.dart -o ocsinventory-cli
+8. Instalar via setup/linux/install.sh
+9. Registrar e iniciar serviço systemd / OpenRC
+10. Verificar instalação
+```
+
+### Problemas comuns no agente
+
+**`dart` não encontrado após instalação:**
+```bash
+# Verificar se o symlink existe
+ls -la /usr/local/bin/dart
+
+# Se não existir, recriar
+ln -sf /opt/dart-sdk/bin/dart /usr/local/bin/dart
+```
+
+**Agente não aparece no console após instalação:**
+- Verifique se o serviço está ativo: `systemctl status ocsinventory-agent`
+- Verifique conectividade com o backend: `timeout 3 bash -c "echo > /dev/tcp/IP_BACKEND/8000" && echo OK`
+- Verifique o log do agente: `journalctl -u ocsinventory-agent -n 50`
+- Force um envio imediato: `ocsinventory-cli --now`
+
+**Windows — download falhou:**
+1. Baixe manualmente o instalador em: `https://github.com/OCSInventory-NG/OCSInventory-Agent-Rework/releases`
+2. Coloque o `.exe` na mesma pasta do `.bat`
+3. Execute o `.bat` normalmente — ele detecta o arquivo local e usa
+
+**Proxy no ambiente interceptando o curl/download:**
+```bash
+# Linux: forçar sem proxy
+curl --noproxy '*' -fsSL http://IP_BACKEND:8000/api-check/
+```
+

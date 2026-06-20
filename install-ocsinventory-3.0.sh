@@ -329,6 +329,19 @@ detect_os() {
 pkg_install() {
   local mgr_cmd="dnf"
   [ "$PKG_MGR" = "yum" ] && mgr_cmd="yum"
+
+  # Processos rpm travados bloqueiam o D-Bus do systemd e o dnf inteiro.
+  # Isso costuma acontecer apos snapshot/restore ou rpm -e interrompido.
+  # Detecta e mata qualquer rpm preso em estado D (uninterruptible sleep)
+  # antes de tentar instalar -- sem isso todos os pkg_install travam.
+  local stuck_rpm
+  stuck_rpm=$(ps -eo pid,stat,comm | awk '/[Rr]pm/ && /D/{print $1}' 2>/dev/null || true)
+  if [ -n "$stuck_rpm" ]; then
+    warn "Processo rpm travado detectado (PID ${stuck_rpm}) -- matando antes de instalar pacotes."
+    kill -9 $stuck_rpm 2>/dev/null || true
+    sleep 2
+  fi
+
   local attempt=1 max=3 delay=5 tmp_out
   tmp_out=$(mktemp)
   while true; do
@@ -339,6 +352,7 @@ pkg_install() {
     if grep -qE "DB_VERSION_MISMATCH|cannot open Packages database" "$tmp_out"; then
       warn "Banco de dados do RPM corrompido detectado (BDB0091 DB_VERSION_MISMATCH); removendo /var/lib/rpm/__db* e tentando novamente..."
       rm -f /var/lib/rpm/__db* 2>/dev/null || true
+      rpm --rebuilddb 2>/dev/null || true
     fi
     if [ "$attempt" -ge "$max" ]; then
       rm -f "$tmp_out"
@@ -476,7 +490,9 @@ wait_for_active() {
 wait_for_http() {
   local url=$1 timeout=${2:-30} start
   start=$(date +%s)
-  while ! curl -fsS -o /dev/null "$url" 2>/dev/null; do
+  # --noproxy evita que proxies HTTP do ambiente (Squid, etc.) interceptem
+  # verificacoes de servicos locais e retornem erro de gateway falso.
+  while ! curl -fsS --noproxy '*' -o /dev/null "$url" 2>/dev/null; do
     if [ $(( $(date +%s) - start )) -ge "$timeout" ]; then
       return 1
     fi
@@ -1851,10 +1867,13 @@ After=network.target ${after_db}
 User=$OCS_SYS_USER
 Group=$OCS_SYS_USER
 RuntimeDirectory=ocsinventory-backend
+RuntimeDirectoryMode=0755
 WorkingDirectory=$BASE_DIR/backend
 ExecStart=$BASE_DIR/backend/venv/bin/uwsgi --ini $BASE_DIR/backend/uwsgi.ini
-Restart=always
+Restart=on-failure
 RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGQUIT
 
 [Install]
 WantedBy=multi-user.target
@@ -2133,13 +2152,15 @@ install_agent() {
 # Validacao final / resumo
 #############################################
 validate_install() {
-  if curl -fsS "http://127.0.0.1:${BACKEND_PORT}/api-check/" >/dev/null 2>&1; then
+  # Usar --noproxy para evitar que o Squid (ou qualquer proxy HTTP do
+  # ambiente) intercepte a conexao local e retorne erro de gateway.
+  if curl -fsS --noproxy '*' "http://127.0.0.1:${BACKEND_PORT}/api-check/" >/dev/null 2>&1; then
     info "Backend respondendo em /api-check/."
   else
     warn "Backend nao respondeu ao check final em /api-check/."
   fi
 
-  if curl -fsS "http://127.0.0.1:${FRONTEND_PORT}/" >/dev/null 2>&1; then
+  if curl -fsS --noproxy '*' "http://127.0.0.1:${FRONTEND_PORT}/" >/dev/null 2>&1; then
     info "Frontend respondendo."
   else
     warn "Frontend nao respondeu ao check final."
