@@ -41,6 +41,7 @@ OCS_SYS_USER="ocs"
 
 BACKEND_PORT="8000"
 FRONTEND_PORT="8080"
+RELAY_PORT="80"        # porta publica do relay (agentes ja configurados apontam aqui)
 
 # Papel deste servidor na arquitetura
 ROLE=""
@@ -635,6 +636,25 @@ setup_firewall() {
         ;;
       rhel)
         command -v firewall-cmd &>/dev/null && systemctl enable --now firewalld 2>/dev/null || true
+        ;;
+    esac
+    return 0
+  fi
+
+  # Papel relay: abre a porta publica do relay (80 por padrao) em vez de BACKEND_PORT
+  if [ "$ROLE" = "relay" ]; then
+    info "Papel 'relay': abrindo porta ${RELAY_PORT}/tcp no firewall (porta publica dos agentes)..."
+    case "$PKG_FAMILY" in
+      debian)
+        if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+          ufw allow "${RELAY_PORT}/tcp" >/dev/null 2>&1 || true
+        fi
+        ;;
+      rhel)
+        if systemctl is-active --quiet firewalld 2>/dev/null; then
+          firewall-cmd --permanent --add-port="${RELAY_PORT}/tcp" >/dev/null 2>&1 || true
+          firewall-cmd --reload >/dev/null 2>&1 || true
+        fi
         ;;
     esac
     return 0
@@ -1712,6 +1732,124 @@ setup_backend_role() {
 }
 
 #############################################
+# Papel "relay": backend + Nginx na porta 80
+# Para sites remotos onde os agentes ja estao
+# configurados para reportar na porta 80.
+# O Nginx escuta na :80 e repassa para uWSGI
+# na :8000 (unix socket) internamente.
+#############################################
+setup_relay_role() {
+  if [ -z "$BACKEND_HOST" ]; then
+    : # relay conecta ao banco, nao a outro backend
+  fi
+  info "Papel 'relay': Nginx escutara na porta ${RELAY_PORT} e repassara para uWSGI (porta ${BACKEND_PORT} interna)."
+  info "Agentes devem apontar para: http://${SERVER_HOST}:${RELAY_PORT}"
+}
+
+# Configura o Nginx do relay: escuta na porta publica (80 por padrao) e
+# faz proxy_pass para o socket uWSGI do backend. Difere do backend normal
+# que escuta na mesma porta que o uWSGI expoe -- aqui sao duas portas
+# distintas: uma publica (:80) para os agentes e uma interna (:8000 / socket)
+# para o Django.
+backend_setup_relay_nginx() {
+  # Porta interna do uWSGI continua sendo BACKEND_PORT (8000).
+  # Porta publica para os agentes e RELAY_PORT (80 por padrao).
+  check_port_free_or_nginx "$RELAY_PORT"
+
+  local vhost_file
+  case "$PKG_FAMILY" in
+    debian)
+      disable_default_nginx_site_if_needed "$RELAY_PORT"
+      vhost_file="/etc/nginx/sites-available/ocsinventory-relay"
+      ;;
+    rhel)
+      vhost_file="/etc/nginx/conf.d/ocsinventory-relay.conf"
+      # Remover o server block padrao da porta 80 que vem no nginx.conf do RHEL
+      if [ -f /etc/nginx/nginx.conf ] && grep -q "listen.*80" /etc/nginx/nginx.conf; then
+        warn "Desabilitando server block padrao da porta 80 em /etc/nginx/nginx.conf..."
+        sed -i '/^\s*server\s*{/{:loop; N; /^\s*server\s*{[^}]*listen\s*80/,/^\s*}/{ /^\s*}/d; b loop}; P; D}' \
+          /etc/nginx/nginx.conf 2>/dev/null || true
+        # Abordagem mais segura: mover o default para um arquivo separado desabilitado
+        if grep -q "listen.*80" /etc/nginx/nginx.conf; then
+          python3 - /etc/nginx/nginx.conf << 'PYEOF'
+import re, sys, shutil
+path = sys.argv[1]
+shutil.copy(path, path + '.bak-ocs')
+with open(path) as f:
+    txt = f.read()
+# Remove blocos server { ... } que contenham "listen       80"
+pattern = r'(?ms)^\s{0,4}server\s*\{(?:[^{}]|\{[^{}]*\})*listen\s+80\b(?:[^{}]|\{[^{}]*\})*\}'
+txt2 = re.sub(pattern, '', txt)
+with open(path, 'w') as f:
+    f.write(txt2)
+print("Backup salvo em " + path + ".bak-ocs")
+PYEOF
+        fi
+      fi
+      ;;
+  esac
+
+  cat > "$vhost_file" <<EOF
+# OCS Inventory -- Relay de agentes
+# Escuta na porta ${RELAY_PORT} (porta que os agentes remotos ja conhecem)
+# e repassa para o uWSGI do backend na porta interna ${BACKEND_PORT}.
+server {
+    listen ${RELAY_PORT};
+    server_name _;
+    server_tokens off;
+
+    access_log /var/log/ocsinventory-backend/relay-access.log;
+    error_log  /var/log/ocsinventory-backend/relay-error.log;
+
+    # Aumentar timeouts e tamanho de body para inventarios grandes
+    client_max_body_size 64m;
+    client_body_timeout  120s;
+    send_timeout         120s;
+    proxy_read_timeout   120s;
+
+    location = /favicon.ico { access_log off; log_not_found off; }
+
+    location /static/ {
+        alias $BASE_DIR/backend/static/;
+    }
+
+    # Todo o resto vai para o uWSGI do backend (porta interna ${BACKEND_PORT})
+    location / {
+        include         uwsgi_params;
+        uwsgi_pass      unix:/run/ocsinventory-backend/ocsinventory-backend.sock;
+        uwsgi_param     UWSGI_SCHEME \$scheme;
+        uwsgi_param     SERVER_SOFTWARE nginx/\$nginx_version;
+        uwsgi_param     HTTP_HOST \$host;
+        uwsgi_param     REQUEST_URI \$request_uri;
+        uwsgi_param     DOCUMENT_ROOT \$document_root;
+        # Preservar IP real do agente nos logs do Django
+        uwsgi_param     HTTP_X_FORWARDED_FOR \$remote_addr;
+        uwsgi_param     HTTP_X_REAL_IP \$remote_addr;
+    }
+}
+EOF
+
+  if [ "$PKG_FAMILY" = "debian" ]; then
+    ln -sf "$vhost_file" /etc/nginx/sites-enabled/ocsinventory-relay
+  fi
+
+  if [ "$PKG_FAMILY" = "rhel" ]; then
+    selinux_allow_http_port "$RELAY_PORT"
+    selinux_label_path "/run/ocsinventory-backend" httpd_var_run_t
+    selinux_label_path "$BASE_DIR/backend/static" httpd_sys_content_t
+  fi
+
+  nginx -t || die "Configuracao do Nginx para o relay esta invalida."
+  systemctl reload nginx 2>/dev/null || systemctl restart nginx
+
+  if ! wait_for_http "http://127.0.0.1:${RELAY_PORT}/api-check/" 30; then
+    warn "Relay nao respondeu em /api-check/ na porta ${RELAY_PORT} (pode estar apenas lento; verifique depois)."
+  fi
+
+  info "Relay configurado: agentes -> :${RELAY_PORT} -> uWSGI :${BACKEND_PORT} (interno)"
+}
+
+#############################################
 # Papel "frontend": instala so o console Vue.js + Nginx,
 # apontando para um backend remoto ja instalado.
 #############################################
@@ -2172,8 +2310,13 @@ print_summary() {
     echo "==================================================================="
     echo " OCS Inventory 3.0 (${OCS_TAG}) -- resumo da instalacao"
     echo "==================================================================="
-    echo "Console web ......: http://${SERVER_HOST}:${FRONTEND_PORT}"
-    echo "API backend ......: http://${SERVER_HOST}:${BACKEND_PORT}"
+    if [ "$ROLE" = "relay" ]; then
+      echo "Relay (agentes) ..: http://${SERVER_HOST}:${RELAY_PORT}"
+      echo "Backend interno ..: http://127.0.0.1:${BACKEND_PORT} (uWSGI, nao exposto)"
+    else
+      echo "Console web ......: http://${SERVER_HOST}:${FRONTEND_PORT}"
+      echo "API backend ......: http://${SERVER_HOST}:${BACKEND_PORT}"
+    fi
     echo "Usuario admin ....: ${ADMIN_USER}"
     echo "Senha admin ......: ${ADMIN_PASSWORD}"
     echo "Banco (${DB_ENGINE_CHOICE}) .: ${DB_NAME} / usuario ${DB_USER} @ ${DB_HOST:-localhost}:${DB_PORT}"
@@ -2303,6 +2446,9 @@ Uso: sudo $0 --role PAPEL [opcoes]
 
 Papeis disponíveis (perguntado interativamente se omitido):
   --role db           Banco de dados -- MySQL/MariaDB ou PostgreSQL
+  --role relay        Backend + Nginx na porta 80 (relay para agentes remotos
+                        que ja estao configurados para reportar na porta 80;
+                        Nginx repassa :80 -> uWSGI :8000 internamente)
                         (roda LOCALMENTE no servidor de banco, sem conexao de rede
                         com os outros componentes -- use em ambientes com CyberArk)
   --role backend      API Django + uWSGI (conecta ao --db-host remoto)
@@ -2315,6 +2461,7 @@ Papeis disponíveis (perguntado interativamente se omitido):
 Opcoes gerais:
   --host IP            IP deste servidor (perguntado se houver multiplas interfaces)
   --backend-port PORTA Porta do backend/API (padrao: 8000)
+  --relay-port PORTA   Porta publica do relay para os agentes (padrao: 80, papel relay)
   --frontend-port PORT Porta do console web (padrao: 8080)
   --admin-user USER    Usuario admin do console (padrao: admin)
   --admin-email EMAIL  E-mail do admin (padrao: admin@localhost)
@@ -2363,6 +2510,7 @@ parse_args() {
       --host) SERVER_HOST="$2"; shift 2 ;;
       --backend-port) BACKEND_PORT="$2"; shift 2 ;;
       --frontend-port) FRONTEND_PORT="$2"; shift 2 ;;
+      --relay-port)   RELAY_PORT="$2"; shift 2 ;;
       --db-host) DB_HOST="$2"; shift 2 ;;
       --db-port) DB_PORT="$2"; shift 2 ;;
       --db-name) DB_NAME="$2"; shift 2 ;;
@@ -2391,7 +2539,7 @@ parse_args() {
   done
 
   case "$ROLE" in
-    ""|db|backend|frontend|snmp|app|standalone|db-remote) ;;
+    ""|db|backend|frontend|snmp|app|standalone|db-remote|relay) ;;
     *) die "Valor invalido para --role: '$ROLE'. Opcoes: db, backend, frontend, snmp, app, standalone, db-remote" ;;
   esac
   case "$DB_ENGINE_CHOICE" in
@@ -2423,11 +2571,16 @@ ask_role_if_needed() {
   [5] Aplicacao completa  -- Backend + Frontend no mesmo servidor
   [6] Tudo em um          -- Banco + Backend + Frontend (laboratorio/teste)
 
+  REDES REMOTAS / SITES DISTRIBUIDOS:
+  [8] Relay de agentes    -- Backend + Nginx escutando na porta 80
+                             (agentes remotos enviam para :80, Nginx
+                              repassa internamente para uWSGI :8000)
+
   AVANCADO:
   [7] Preparar banco em OUTRO servidor via SSH (exige SSH entre hosts)
 EOF
   local choice
-  read -r -p "Escolha [1-7]: " choice
+  read -r -p "Escolha [1-8]: " choice
   case "$choice" in
     1) ROLE="db" ;;
     2) ROLE="backend" ;;
@@ -2436,6 +2589,7 @@ EOF
     5) ROLE="app" ;;
     6) ROLE="standalone" ;;
     7) ROLE="db-remote" ;;
+    8) ROLE="relay" ;;
     *) die "Opcao invalida: $choice" ;;
   esac
 }
@@ -2446,7 +2600,7 @@ set_db_engine_default() {
   fi
   case "$ROLE" in
     standalone) DB_ENGINE_CHOICE="postgresql" ;;
-    backend|app) DB_ENGINE_CHOICE="mysql" ;;
+    backend|app|relay) DB_ENGINE_CHOICE="mysql" ;;
     db|db-remote) DB_ENGINE_CHOICE="" ;;  # decidido em setup_db_role()
     frontend|snmp) DB_ENGINE_CHOICE="" ;; # nao se conectam ao banco diretamente
   esac
@@ -2458,7 +2612,7 @@ decide_optional_components() {
   if [ "$SKIP_SNMP" -eq -1 ]; then
     case "$ROLE" in
       standalone) SKIP_SNMP=0 ;;
-      app)
+      app|relay)
         if ask_yes_no "Instalar o SNMP Scanner tambem neste servidor?" "N"; then
           SKIP_SNMP=0
         else
@@ -2512,6 +2666,15 @@ confirm_or_die() {
   - instalar Python 3.12, uWSGI e Nginx (proxy do backend)
   - criar o usuario de sistema '$OCS_SYS_USER' e o diretorio $BASE_DIR
   - abrir a porta ${BACKEND_PORT} no firewall
+  - instalar o agente OCS neste servidor"
+      ;;
+    relay)
+      resumo="  - conectar ao banco de dados em ${DB_HOST} (${DB_ENGINE_CHOICE})
+  - instalar Python 3.12, uWSGI e Nginx
+  - Nginx escutara na porta ${RELAY_PORT} (agentes ja configurados apontam aqui)
+  - uWSGI escutara internamente na porta ${BACKEND_PORT} (invisivel para os agentes)
+  - criar o usuario de sistema '$OCS_SYS_USER' e o diretorio $BASE_DIR
+  - abrir a porta ${RELAY_PORT} no firewall
   - instalar o agente OCS neste servidor"
       ;;
     frontend)
@@ -2611,6 +2774,23 @@ main() {
 
   # --- Todos os outros papeis precisam do usuario de sistema ---
   run_required "Usuario de sistema '$OCS_SYS_USER'" create_system_user
+
+  # --- Papel relay (backend + nginx porta 80 para agentes remotos) ---
+  if [ "$ROLE" = "relay" ]; then
+    run_required "Conexao com banco de dados remoto (${DB_ENGINE_CHOICE})" setup_app_role_db_connection
+    run_required "Backend - codigo e dependencias"  install_backend
+    run_required "Backend - configuracao (.env)"    configure_backend_env
+    run_required "Backend - migracoes e estaticos"  backend_migrate_and_static
+    run_required "Backend - superusuario"           backend_create_superuser
+    run_required "Backend - uWSGI"                  backend_setup_uwsgi_and_nginx
+    run_required "Relay - Nginx porta ${RELAY_PORT}" backend_setup_relay_nginx
+    run_required "Backend - timer de automacao"     backend_setup_automation_timer
+    decide_optional_components
+    run_optional "Agente local (Dart)" install_agent
+    validate_install
+    print_summary
+    return 0
+  fi
 
   # --- Papel backend ---
   if [ "$ROLE" = "backend" ] || [ "$ROLE" = "app" ] || [ "$ROLE" = "standalone" ]; then

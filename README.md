@@ -1,77 +1,82 @@
 # OCS Inventory 3.0 — Instalador Multi-Layer
 
-Script de instalação do **OCS Inventory 3.0** (tag `3.0.0-rc1`), com suporte a arquitetura multi-layer completa: cada componente pode ser instalado em um servidor dedicado, combinado conforme a necessidade, ou tudo em um único servidor para laboratório.
-
-**Lições aprendidas em produção** integradas ao script: seleção interativa de IP quando o servidor tem múltiplas interfaces de rede, teste de conectividade TCP antes de instalar qualquer coisa, detecção e auto-correção de corrupção do banco RPM, tratamento de bloqueio de microsegmentação (Guardicore, NSX), correção automática de locale inválido para o `initdb` do PostgreSQL, e regras do `pg_hba.conf` sempre gravadas com IP + máscara (`/32`) em vez de hostname — evitando falhas silenciosas de resolução DNS entre servidores.
+Conjunto de scripts para instalação, atualização e distribuição do **OCS Inventory 3.0** (tag `3.0.0-rc1`) em qualquer topologia de rede — de um único servidor de laboratório a ambientes corporativos distribuídos em múltiplos sites.
 
 ---
 
 ## Índice
 
-1. [Arquitetura do OCS Inventory 3.0](#1-arquitetura-do-ocs-inventory-30)
-2. [Papéis disponíveis](#2-papéis-disponíveis)
-3. [Seleção de IP (múltiplas interfaces)](#3-seleção-de-ip-múltiplas-interfaces)
+1. [Arquitetura e componentes](#1-arquitetura-e-componentes)
+2. [Papéis de instalação do servidor](#2-papéis-de-instalação-do-servidor)
+3. [Scripts disponíveis](#3-scripts-disponíveis)
 4. [Pré-requisitos](#4-pré-requisitos)
-5. [Tipos de instalação — passo a passo](#5-tipos-de-instalação--passo-a-passo)
-   - 5.1 [Tudo em um (laboratório)](#51-tudo-em-um-laboratório)
-   - 5.2 [Duas camadas: App + Banco](#52-duas-camadas-app--banco)
-   - 5.3 [Quatro camadas: Banco + Backend + Frontend + SNMP](#53-quatro-camadas-banco--backend--frontend--snmp)
-   - 5.4 [Banco em outro servidor via SSH](#54-banco-em-outro-servidor-via-ssh)
-6. [Referência de flags](#6-referência-de-flags)
-7. [O que o script instala por papel](#7-o-que-o-script-instala-por-papel)
-8. [Ordem das etapas](#8-ordem-das-etapas)
-9. [Banco de dados — detalhes](#9-banco-de-dados--detalhes)
-10. [Particularidades por distro](#10-particularidades-por-distro)
-11. [Problemas conhecidos e soluções](#11-problemas-conhecidos-e-soluções)
-12. [Validação pós-instalação](#12-validação-pós-instalação)
-13. [Logs e credenciais](#13-logs-e-credenciais)
-14. [Idempotência](#14-idempotência)
-15. [Limitações conhecidas](#15-limitações-conhecidas)
-16. [Licença](#16-licença)
-17. [Referências](#17-referências)
-18. [Instalação do Agente nos Endpoints](#18-instalação-do-agente-nos-endpoints)
+5. [Instalação do servidor — tipos e exemplos](#5-instalação-do-servidor--tipos-e-exemplos)
+   - 5.1 [Tudo em um — laboratório](#51-tudo-em-um--laboratório)
+   - 5.2 [Duas camadas — App + Banco](#52-duas-camadas--app--banco)
+   - 5.3 [Três camadas — Banco + Backend + Frontend](#53-três-camadas--banco--backend--frontend)
+   - 5.4 [Quatro camadas — Banco + Backend + Frontend + SNMP](#54-quatro-camadas--banco--backend--frontend--snmp)
+   - 5.5 [Relay de agentes — site remoto com porta 80](#55-relay-de-agentes--site-remoto-com-porta-80)
+   - 5.6 [Multi-site com relays distribuídos](#56-multi-site-com-relays-distribuídos)
+   - 5.7 [Banco em outro servidor via SSH](#57-banco-em-outro-servidor-via-ssh)
+6. [Instalação do agente nos endpoints](#6-instalação-do-agente-nos-endpoints)
+   - 6.1 [Linux / Unix](#61-linux--unix)
+   - 6.2 [Windows](#62-windows)
+   - 6.3 [Credenciais do agente](#63-credenciais-do-agente)
+   - 6.4 [Atualização automática](#64-atualização-automática)
+7. [Referência de flags — servidor](#7-referência-de-flags--servidor)
+8. [Referência de flags — agente Linux](#8-referência-de-flags--agente-linux)
+9. [Seleção de IP com múltiplas interfaces](#9-seleção-de-ip-com-múltiplas-interfaces)
+10. [Banco de dados — detalhes](#10-banco-de-dados--detalhes)
+11. [Particularidades por distro](#11-particularidades-por-distro)
+12. [Problemas conhecidos e soluções](#12-problemas-conhecidos-e-soluções)
+13. [Validação pós-instalação](#13-validação-pós-instalação)
+14. [Logs e credenciais](#14-logs-e-credenciais)
+15. [Idempotência](#15-idempotência)
+16. [Limitações conhecidas](#16-limitações-conhecidas)
+17. [Licença](#17-licença)
+18. [Referências](#18-referências)
 
 ---
 
-## 1. Arquitetura do OCS Inventory 3.0
+## 1. Arquitetura e componentes
 
-A versão 3.0 é uma reescrita completa. Em vez do antigo servidor Perl + console PHP, a stack agora é:
+O OCS Inventory 3.0 é uma reescrita completa da stack. Os componentes são independentes e podem ser distribuídos livremente entre servidores.
 
-| Componente | Tecnologia | Papel | Porta padrão |
+| Componente | Tecnologia | Função | Porta padrão |
 |---|---|---|---|
 | **Backend** | Django 6 + DRF + uWSGI | API REST, autenticação, regras de negócio | `8000` |
 | **Frontend** | Vue 3 + Vite + Nginx | Console web do administrador | `8080` |
-| **Automação / IPDiscover** | `manage.py automation` (systemd timer) | Regras agendadas, IPDiscover server-side | — |
-| **SNMP Scanner** | Python standalone (systemd timer) | Descoberta de dispositivos via SNMP | — |
-| **Agente** | Dart (binário único) | Coleta de inventário nos endpoints | — |
-| **Banco de dados** | PostgreSQL 14+ ou MariaDB 10.6+ / MySQL 8.0+ | Persistência | `5432` / `3306` |
+| **Relay** | Nginx (proxy) → uWSGI | Entrada para agentes legados na porta 80 | `80` → `8000` |
+| **Automação** | `manage.py automation` (systemd timer) | IPDiscover, regras agendadas | — |
+| **SNMP Scanner** | Python (systemd timer) | Descoberta SNMP na rede | — |
+| **Agente** | Dart (binário compilado) | Coleta de inventário nos endpoints | — |
+| **Banco** | PostgreSQL 14+ ou MariaDB 10.6+ / MySQL 8.0+ | Persistência | `5432` / `3306` |
 
-### Arquitetura máxima (4 camadas)
+### Conectividade entre componentes
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                        Clientes / Agentes                        │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │ HTTP :8080
-              ┌──────────────▼──────────────┐
-              │   Servidor C — Frontend     │
-              │   Vue 3 + Nginx (:8080)     │
-              └──────────────┬──────────────┘
-                             │ HTTP :8000
-              ┌──────────────▼──────────────┐       ┌─────────────────────┐
-              │   Servidor B — Backend      │◄──────►│  Servidor D — SNMP  │
-              │   Django + uWSGI (:8000)    │       │  Scanner Python     │
-              └──────────────┬──────────────┘       └─────────────────────┘
-                             │ TCP :5432 / :3306
-              ┌──────────────▼──────────────┐
-              │   Servidor A — Banco        │
-              │   PostgreSQL / MariaDB      │
-              └─────────────────────────────┘
+Endpoints / Agentes
+        │
+        │ :80 (relay) ou :8000 (backend direto)
+        ▼
+┌───────────────┐     :5432 ou :3306     ┌──────────────┐
+│   Backend /   │ ──────────────────────► │    Banco     │
+│    Relay      │                         │  de Dados    │
+└───────────────┘                         └──────────────┘
+        ▲
+        │ :8000
+┌───────┴───────┐
+│   Frontend    │ ◄── Navegador do administrador (:8080)
+└───────────────┘
+
+┌───────────────┐     :8000              
+│ SNMP Scanner  │ ──────────────────────► Backend
+└───────────────┘
 ```
 
 ---
 
-## 2. Papéis disponíveis
+## 2. Papéis de instalação do servidor
 
 O script apresenta um menu interativo ao ser executado sem `--role`:
 
@@ -90,204 +95,190 @@ O script apresenta um menu interativo ao ser executado sem `--role`:
   [5] Aplicacao completa  -- Backend + Frontend no mesmo servidor
   [6] Tudo em um          -- Banco + Backend + Frontend (laboratorio/teste)
 
+  REDES REMOTAS / SITES DISTRIBUIDOS:
+  [8] Relay de agentes    -- Backend + Nginx escutando na porta 80
+                             (agentes remotos ja configurados para :80;
+                              Nginx repassa :80 -> uWSGI :8000 internamente)
+
   AVANCADO:
   [7] Preparar banco em OUTRO servidor via SSH (exige SSH entre hosts)
 ```
 
-| `--role` | Menu | Instala | Banco |
+| `--role` | Opção | Instala | Banco |
 |---|---|---|---|
 | `db` | [1] | Banco de dados | Local |
-| `backend` | [2] | Django + uWSGI + Nginx | Remoto |
-| `frontend` | [3] | Node.js + Nginx | — |
+| `backend` | [2] | Django + uWSGI + Nginx (:8000) | Remoto |
+| `frontend` | [3] | Node.js + Nginx (:8080) | — |
 | `snmp` | [4] | Python + SNMP Scanner | — |
 | `app` | [5] | Backend + Frontend | Remoto |
-| `standalone` | [6] | Tudo | Local |
-| `db-remote` | [7] | (executa `--role db` em outro servidor via SSH) | — |
+| `standalone` | [6] | Tudo em um | Local |
+| `db-remote` | [7] | (executa `--role db` remotamente via SSH) | — |
+| `relay` | [8] | Django + uWSGI + Nginx (:80 → :8000) | Remoto |
 
-> **Agente OCS:** em arquitetura multi-layer, o agente é instalado em **todos** os servidores automaticamente (o script pergunta em cada papel, com padrão "sim" — exceto no servidor de banco onde o padrão é "não"). No modo `standalone`, o agente é sempre instalado.
+> **Agente OCS:** em qualquer papel multi-layer, o script oferece instalar o agente no próprio servidor (padrão "sim") para que ele também apareça no inventário. No papel `standalone`, o agente é instalado automaticamente. No papel `db`, o padrão é não instalar.
 
 ---
 
-## 3. Seleção de IP (múltiplas interfaces)
+## 3. Scripts disponíveis
 
-Quando o servidor tem mais de uma interface de rede (cenário comum em produção), o script lista todas e pergunta qual usar para comunicação com os outros componentes:
-
-```
-Este servidor tem 3 interfaces de rede. Qual IP os outros
-componentes devem usar para se conectar a ESTE servidor?
-  [1] 172.18.190.103      (ens160)
-  [2] 10.24.22.90         (ens192)
-  [3] 172.27.31.115       (ens224)
-Escolha [1-3]:
-```
-
-O IP selecionado é usado nas URLs do console, nas regras do banco (`pg_hba.conf`, GRANT MySQL) e nas configurações do agente. Para pular a pergunta, passe `--host IP` na linha de comando.
-
-> **Nota sobre microsegmentação (Guardicore, NSX, etc.):** se o servidor tiver múltiplas interfaces, escolha a interface pela qual os outros servidores **realmente conseguem alcançar** este servidor. Se a conectividade TCP estiver bloqueada em alguma interface, o script detecta e avisa antes de instalar qualquer coisa — poupando horas de diagnóstico.
+| Arquivo | Finalidade |
+|---|---|
+| `install-ocsinventory-3.0.sh` | Instalação e configuração dos **servidores** (backend, frontend, banco, relay, etc.) |
+| `install-ocsinventory-agent.sh` | Instalação / atualização do **agente** em endpoints Linux / Unix |
+| `install-ocsinventory-agent.bat` | Instalação / atualização do **agente** em endpoints Windows |
 
 ---
 
 ## 4. Pré-requisitos
 
-### Sistema operacional suportado
+### Sistemas operacionais suportados — servidor
 
 | Família | Distros testadas |
 |---|---|
 | **Debian** | Ubuntu 22.04, Ubuntu 24.04, Debian 12, Debian 13 |
 | **RHEL** | AlmaLinux 8.x / 9.x, Rocky Linux 8/9, RHEL 8/9/10, Fedora |
 
-### Por papel
+### Sistemas operacionais suportados — agente
 
-| Papel | Requisitos mínimos |
+| Família | Exemplos |
 |---|---|
-| `db` | Acesso root local; banco já instalado ou permissão para instalar |
-| `backend` | Acesso root local; conectividade TCP com o servidor de banco |
-| `frontend` | Acesso root local; conectividade TCP com o servidor de backend (:8000) |
-| `snmp` | Acesso root local; conectividade TCP com o servidor de backend (:8000) |
-| `app` / `standalone` | Acesso root local; conectividade TCP com o banco (se remoto) |
-| `db-remote` | SSH liberado entre este host e o servidor de banco |
+| Debian | Ubuntu, Mint, Kali, Raspbian, Pop!_OS |
+| RHEL | AlmaLinux, Rocky, Fedora, CentOS, Amazon Linux |
+| SUSE | openSUSE, SLES |
+| Arch | Arch Linux, Manjaro, EndeavourOS |
+| Alpine | Alpine Linux |
+| Slackware | Slackware |
+| Windows | Windows 7 SP1+ / Server 2008 R2+ |
 
-### Banco de dados — versões mínimas exigidas pelo Django 6.0
+### Versões mínimas do banco (Django 6.0)
 
-| Motor | Versão mínima | Versão recomendada |
+| Motor | Mínimo | Recomendado |
 |---|---|---|
 | PostgreSQL | 14 | 15 LTS |
 | MariaDB | **10.6** | 10.11 LTS |
 | MySQL | 8.0.11 | 8.0+ |
 
-> ⚠️ O **MariaDB 10.3.x** que vem por padrão no AlmaLinux/RHEL 8 está **abaixo do mínimo** e fora de suporte oficial (EOL desde maio de 2023). O script detecta e avisa, dando a opção de abortar para atualizar o banco antes de prosseguir.
+### Conectividade necessária entre servidores
 
-### Conectividade de rede necessária
-
-| De | Para | Porta | Serviço |
+| De | Para | Porta | Obrigatório |
 |---|---|---|---|
-| `backend` | `db` | 5432 ou 3306 | Banco de dados |
-| `frontend` | `backend` | 8000 | API Django |
-| `snmp` | `backend` | 8000 | API Django |
-| Agentes | `backend` | 8000 | Envio de inventário |
-| Navegador | `frontend` | 8080 | Console web |
+| `backend` / `relay` | `db` | 5432 ou 3306 | ✅ |
+| `frontend` | `backend` / `relay` | 8000 | ✅ |
+| `snmp` | `backend` | 8000 | ✅ |
+| Agentes | `backend` | 8000 | ✅ |
+| Agentes legados | `relay` | 80 | ✅ |
+| Navegador | `frontend` | 8080 | ✅ |
 
-> ⚠️ **Microsegmentação (Guardicore, NSX, ACL de rede):** essas ferramentas bloqueiam tráfego TCP por política de segmento — o SO do servidor pode ter a porta aberta no `firewalld`/`ufw` e o `ping` pode funcionar, mas o TCP ainda assim é bloqueado na camada de rede. O script testa a conectividade TCP antecipadamente e informa exatamente qual porta e host estão bloqueados.
+> ⚠️ **Microsegmentação (Guardicore, NSX, ACL de rede):** o ping pode funcionar mas o TCP ser bloqueado na camada de rede. O script testa a conectividade TCP **antes** de instalar qualquer coisa e avisa o que está bloqueado.
 
 ---
 
-## 5. Tipos de instalação — passo a passo
+## 5. Instalação do servidor — tipos e exemplos
 
-### 5.1 Tudo em um (laboratório)
+### 5.1 Tudo em um — laboratório
 
-Um único servidor, banco de dados local (PostgreSQL por padrão), sem perguntas.
+Banco, backend, frontend, SNMP Scanner e agente em um único servidor.
 
 ```
-┌─────────────────────────────┐
-│     Servidor único          │
-│  PostgreSQL + Backend       │
-│  + Frontend + SNMP + Agente │
-└─────────────────────────────┘
+┌──────────────────────────────────────┐
+│            Servidor único            │
+│                                      │
+│  PostgreSQL  ◄──  Django/uWSGI :8000 │
+│                        │             │
+│               Vue/Nginx :8080        │
+│               SNMP Scanner           │
+│               Agente OCS             │
+└──────────────────────────────────────┘
+         ▲
+         │ :8080 (console)
+    Administrador
 ```
 
-**Comando:**
 ```bash
+# PostgreSQL (padrão)
 sudo ./install-ocsinventory-3.0.sh --role standalone -y
-```
 
-**Com MySQL/MariaDB local:**
-```bash
+# Com MySQL/MariaDB
 sudo ./install-ocsinventory-3.0.sh --role standalone --db-engine mysql -y
-```
 
-**O que acontece:**
-1. Detecta o IP do servidor (seleciona automaticamente se só houver um)
-2. Instala todas as dependências (Python 3.12, Node.js 20, Dart SDK, Nginx, banco)
-3. Cria usuário de sistema `ocs`, banco `ocsdb`, usuário `ocsuser`
-4. Instala e configura backend (Django + uWSGI), frontend (Vue + Nginx), SNMP Scanner e agente
-5. Imprime URL do console, login e senha em `/root/ocsinventory-credentials.txt`
+# Com senha do admin definida
+sudo ./install-ocsinventory-3.0.sh --role standalone --admin-password 'MinhaSenh@' -y
+```
 
 ---
 
-### 5.2 Duas camadas: App + Banco
+### 5.2 Duas camadas — App + Banco
+
+Backend e frontend em um servidor, banco em outro.
 
 ```
-┌─────────────────────┐        ┌─────────────────────────────┐
-│   Servidor de Banco │        │   Servidor de Aplicação     │
-│   MySQL/MariaDB ou  │◄──────►│   Backend + Frontend        │
-│   PostgreSQL        │  TCP   │   + SNMP Scanner + Agente   │
-└─────────────────────┘        └─────────────────────────────┘
-  lnxdcocsdb01                   lnxdcocsapp01
+┌──────────────────┐              ┌──────────────────────────────┐
+│  Servidor Banco  │              │      Servidor Aplicação      │
+│                  │              │                              │
+│  PostgreSQL      │◄──:5432─────►│  Django/uWSGI :8000          │
+│  ou MariaDB      │              │  Vue/Nginx    :8080          │
+│                  │              │  SNMP Scanner                │
+│                  │              │  Agente OCS                  │
+└──────────────────┘              └──────────────────────────────┘
+                                           ▲
+                                    :8080  │  :8000
+                                  Console  │  Agentes
 ```
 
-> **Ambientes com CyberArk / bastion / bloqueio de movimento lateral:** execute o script com `--role db` **diretamente no servidor de banco** via sessão vaultada normal. O papel `db` roda 100% local, sem nenhuma conexão de rede com o servidor de aplicação.
+> **Ambientes com CyberArk / bastion:** execute `--role db` diretamente no servidor de banco via sessão vaultada. O papel `db` roda 100% local, sem conexão de rede com o servidor de aplicação.
 
-**Passo 1 — no servidor de banco** (ex.: `lnxdcocsdb01`):
+**Passo 1 — no servidor de banco:**
 ```bash
 sudo ./install-ocsinventory-3.0.sh \
   --role db \
   --db-engine postgresql \
-  --app-host 10.24.22.90
+  --app-host IP_SERVIDOR_APP
 ```
 
-O script vai:
-- Detectar ou instalar o PostgreSQL
-- Perguntar nome/usuário/senha do banco (ou gerar senha aleatória)
-- Criar o banco e o usuário
-- Abrir a porta 5432 no firewall para o IP do servidor de aplicação
-- Adicionar regra no `pg_hba.conf` com IP + `/32` (nunca hostname, para evitar falha de DNS)
-- Imprimir um resumo com o comando exato para o próximo passo
-
-Saída esperada ao final:
+Saída ao final:
 ```
 ===================================================================
  OCS Inventory 3.0 -- banco de dados preparado (papel 'db', postgresql)
 ===================================================================
-Host deste servidor de banco ..: 10.24.22.125
+Host deste servidor de banco ..: IP_BANCO
 Banco de dados .................: ocsdb
 Usuario da aplicacao ...........: ocsuser
-Senha do usuario ................: x8KAj0uYy8DL2KRaXaSYCRUB
-Liberado para o host ............: 10.24.22.90
+Senha do usuario ................: <gerada-aleatoriamente>
 
 Use estes dados ao rodar o script com --role app no servidor de aplicacao:
-  --db-host 10.24.22.125 --db-name ocsdb --db-user ocsuser --db-password 'x8KAj0uYy8DL2KRaXaSYCRUB'
+  --db-host IP_BANCO --db-name ocsdb --db-user ocsuser --db-password '<senha>'
 ===================================================================
 ```
 
-**Passo 2 — no servidor de aplicação** (ex.: `lnxdcocsapp01`):
+**Passo 2 — no servidor de aplicação:**
 ```bash
 sudo ./install-ocsinventory-3.0.sh \
   --role app \
   --db-engine postgresql \
-  --db-host 10.24.22.125 \
+  --db-host IP_BANCO \
   --db-name ocsdb \
   --db-user ocsuser \
-  --db-password 'x8KAj0uYy8DL2KRaXaSYCRUB'
+  --db-password 'SENHA_DO_PASSO_1'
 ```
-
-O script vai:
-- Selecionar o IP correto (pergunta se houver múltiplas interfaces)
-- **Testar a conectividade TCP com o banco antes de instalar qualquer coisa**
-- Instalar Python 3.12, Node.js 20, Dart SDK, Nginx
-- Instalar e configurar backend + frontend + SNMP Scanner + agente
-
-> **Se o servidor tiver múltiplas interfaces:** quando o teste de conexão travar (sem resposta), provavelmente a interface usada não tem rota para o banco. Teste manualmente qual interface funciona: `timeout 3 bash -c "echo > /dev/tcp/IP_DO_BANCO/5432" && echo OK || echo BLOQUEADO`, e passe `--host IP_CORRETO` no comando do passo 2.
 
 ---
 
-### 5.3 Quatro camadas: Banco + Backend + Frontend + SNMP
+### 5.3 Três camadas — Banco + Backend + Frontend
 
 ```
-┌──────────┐   TCP:5432   ┌──────────┐   TCP:8000   ┌──────────┐
-│ Servidor │◄────────────►│ Servidor │◄────────────►│ Servidor │
-│    A     │              │    B     │              │    C     │
-│  Banco   │              │ Backend  │              │ Frontend │
-└──────────┘              └──────────┘              └──────────┘
-                               ▲
-                       TCP:8000│
-                          ┌────┴─────┐
-                          │ Servidor │
-                          │    D     │
-                          │   SNMP   │
-                          └──────────┘
+┌────────────┐    :5432    ┌────────────┐    :8000    ┌────────────┐
+│  Servidor  │◄───────────►│  Servidor  │◄───────────►│  Servidor  │
+│     A      │             │     B      │             │     C      │
+│   Banco    │             │  Backend   │             │  Frontend  │
+│ PostgreSQL │             │  Django    │             │  Vue/Nginx │
+│ ou MariaDB │             │  uWSGI     │             │   :8080    │
+└────────────┘             └────────────┘             └────────────┘
+                                ▲
+                           :8000│
+                           Agentes / SNMP
 ```
 
-**Servidor A — Banco de dados:**
+**Servidor A — Banco:**
 ```bash
 sudo ./install-ocsinventory-3.0.sh \
   --role db \
@@ -295,7 +286,7 @@ sudo ./install-ocsinventory-3.0.sh \
   --app-host IP_SERVIDOR_B
 ```
 
-**Servidor B — Backend (API Django):**
+**Servidor B — Backend:**
 ```bash
 sudo ./install-ocsinventory-3.0.sh \
   --role backend \
@@ -303,32 +294,185 @@ sudo ./install-ocsinventory-3.0.sh \
   --db-host IP_SERVIDOR_A \
   --db-name ocsdb \
   --db-user ocsuser \
-  --db-password 'SENHA_DO_PASSO_A'
+  --db-password 'SENHA'
 ```
 
-**Servidor C — Frontend (console web):**
+**Servidor C — Frontend:**
 ```bash
 sudo ./install-ocsinventory-3.0.sh \
   --role frontend \
   --backend-host IP_SERVIDOR_B
 ```
 
-**Servidor D — SNMP Discovery:**
+---
+
+### 5.4 Quatro camadas — Banco + Backend + Frontend + SNMP
+
+```
+┌────────────┐    :5432    ┌────────────┐    :8000    ┌────────────┐
+│  Servidor  │◄───────────►│  Servidor  │◄───────────►│  Servidor  │
+│     A      │             │     B      │             │     C      │
+│   Banco    │             │  Backend   │             │  Frontend  │
+└────────────┘             └────────────┘             └────────────┘
+                                ▲
+                           :8000│
+                          ┌─────┴──────┐
+                          │  Servidor  │
+                          │     D      │
+                          │    SNMP    │
+                          │  Scanner   │
+                          └────────────┘
+```
+
+**Servidor A — Banco:**
+```bash
+sudo ./install-ocsinventory-3.0.sh \
+  --role db \
+  --db-engine postgresql \
+  --app-host IP_SERVIDOR_B
+```
+
+**Servidor B — Backend:**
+```bash
+sudo ./install-ocsinventory-3.0.sh \
+  --role backend \
+  --db-engine postgresql \
+  --db-host IP_SERVIDOR_A \
+  --db-name ocsdb \
+  --db-user ocsuser \
+  --db-password 'SENHA'
+```
+
+**Servidor C — Frontend:**
+```bash
+sudo ./install-ocsinventory-3.0.sh \
+  --role frontend \
+  --backend-host IP_SERVIDOR_B
+```
+
+**Servidor D — SNMP Scanner:**
 ```bash
 sudo ./install-ocsinventory-3.0.sh \
   --role snmp \
   --backend-host IP_SERVIDOR_B
 ```
 
-> O script testa a conectividade TCP com o componente de destino **antes de instalar qualquer coisa** em cada servidor. Se a porta estiver bloqueada (Guardicore, NSX, ACL), o erro aparece imediatamente com instruções de diagnóstico.
-
-> O agente OCS é instalado em **todos os servidores** (padrão "sim" ao perguntar em cada papel), permitindo que o console mostre o inventário de cada camada da arquitetura.
+> O agente OCS é instalado em todos os servidores por padrão (padrão "sim" ao perguntar em cada papel), permitindo que o console mostre o inventário de cada camada.
 
 ---
 
-### 5.4 Banco em outro servidor via SSH
+### 5.5 Relay de agentes — site remoto com porta 80
 
-Para quando você quer preparar o banco sem logar manualmente no servidor de banco — desde que SSH esteja liberado entre os hosts.
+Para **sites remotos** onde os agentes já estão instalados e configurados para reportar na porta **80**. O Nginx escuta na porta 80, recebe os envios dos agentes e repassa internamente para o uWSGI na porta 8000. O banco de dados fica no core central.
+
+```
+SITE REMOTO                            CORE CENTRAL
+                                        
+┌──────────┐                           ┌──────────────────────────────┐
+│ Endpoint │──►┐                       │                              │
+└──────────┘   │                       │  ┌──────────┐  ┌──────────┐ │
+               │  ┌─────────────────┐  │  │ Frontend │  │  Banco   │ │
+┌──────────┐   └─►│  Servidor Relay │──┼─►│  :8080   │  │ :5432    │ │
+│ Endpoint │──►   │                 │  │  └──────────┘  └──────────┘ │
+└──────────┘      │  Nginx   :80    │  │        ▲             ▲       │
+               ┌─►│  uWSGI   :8000  │  │        │             │       │
+┌──────────┐   │  │  (interno)      │  │  ┌─────┴─────────────┴────┐ │
+│ Endpoint │──►┘  └────────┬────────┘  │  │    Backend :8000       │ │
+└──────────┘               │           │  └────────────────────────┘ │
+                           │ :5432     │                              │
+                           └───────────┼─► Banco Central             │
+                                       └──────────────────────────────┘
+```
+
+**Fluxo dos dados:**
+```
+Agente → :80 → Nginx relay → socket uWSGI → Django → Banco central
+```
+
+**Instalação no servidor relay (site remoto):**
+```bash
+# Porta 80 (padrão para agentes legados)
+sudo ./install-ocsinventory-3.0.sh \
+  --role relay \
+  --db-engine postgresql \
+  --db-host IP_BANCO_CORE \
+  --db-name ocsdb \
+  --db-user ocsuser \
+  --db-password 'SENHA'
+
+# Porta personalizada (ex.: agentes apontam para :8080)
+sudo ./install-ocsinventory-3.0.sh \
+  --role relay \
+  --relay-port 8080 \
+  --db-engine postgresql \
+  --db-host IP_BANCO_CORE \
+  --db-name ocsdb \
+  --db-user ocsuser \
+  --db-password 'SENHA'
+```
+
+**Agentes do site remoto** — instalar apontando para o relay local:
+```bash
+# Linux
+sudo ./install-ocsinventory-agent.sh --url http://IP_RELAY
+
+# Windows
+install-ocsinventory-agent.bat http://IP_RELAY
+```
+
+**Conectividade necessária:**
+
+| De | Para | Porta | Obrigatório |
+|---|---|---|---|
+| Endpoints remotos | Servidor relay | `80/TCP` (ou `--relay-port`) | ✅ |
+| Servidor relay | Banco central | `5432/TCP` | ✅ |
+| Servidor relay | Frontend / Backend core | Nenhuma | ❌ |
+
+---
+
+### 5.6 Multi-site com relays distribuídos
+
+Múltiplos sites remotos, cada um com seu relay, todos gravando no mesmo banco central.
+
+```
+SITE REMOTO A                 SITE REMOTO B                 CORE CENTRAL
+                                                              
+┌──────────┐                  ┌──────────┐                 ┌───────────────────────┐
+│ Endpoint │──►┐              │ Endpoint │──►┐             │                       │
+└──────────┘   │ ┌─────────┐  └──────────┘   │ ┌─────────┐│ ┌────────┐ ┌────────┐│
+               └►│ Relay A │──:5432──────────┼►│ Relay B ││ │Frontend│ │  Banco ││
+┌──────────┐   ┌►│  :80    │  ┌──────────┐  └►│  :80    │└►│ :8080  │ │ :5432  ││
+│ Endpoint │──►┘ └─────────┘  │ Endpoint │──►┘ └─────────┘│ └────────┘ └────────┘│
+└──────────┘                  └──────────┘                 │        ▲       ▲     │
+                                                           │ ┌──────┴───────┴────┐│
+                                                           │ │  Backend  :8000   ││
+                                                           │ └───────────────────┘│
+                                                           └───────────────────────┘
+```
+
+Cada site remoto instala um relay apontando para o **mesmo banco central**:
+
+```bash
+# Site A
+sudo ./install-ocsinventory-3.0.sh \
+  --role relay \
+  --db-host IP_BANCO_CORE \
+  --db-name ocsdb --db-user ocsuser --db-password 'SENHA'
+
+# Site B (mesmo comando, rodado no servidor do site B)
+sudo ./install-ocsinventory-3.0.sh \
+  --role relay \
+  --db-host IP_BANCO_CORE \
+  --db-name ocsdb --db-user ocsuser --db-password 'SENHA'
+```
+
+O console web no core exibe o inventário de **todos os sites** em um lugar só, pois todos compartilham o mesmo banco.
+
+---
+
+### 5.7 Banco em outro servidor via SSH
+
+Prepara o banco em outro servidor remotamente, sem precisar logar nele manualmente. Requer SSH liberado entre os hosts.
 
 > ⚠️ **Não use em ambientes com CyberArk ou bloqueio de movimento lateral.** Nesses casos, use `--role db` diretamente no servidor de banco (seção 5.2).
 
@@ -336,25 +480,133 @@ Para quando você quer preparar o banco sem logar manualmente no servidor de ban
 sudo ./install-ocsinventory-3.0.sh \
   --role db-remote \
   --remote-db-host IP_SERVIDOR_BANCO \
+  --remote-db-ssh-user root \
   --app-host IP_SERVIDOR_APP
 ```
 
-O script copia a si mesmo para o servidor remoto via `scp` e executa `--role db` com um pseudo-terminal alocado — as perguntas interativas aparecem no seu terminal local, como se você estivesse logado no servidor de banco. As credenciais são trazidas de volta em `/root/ocsinventory-credentials-<host>.txt`.
-
-> Requer que o script seja executado a partir de um arquivo local (não funciona via `curl | bash`).
+O script copia a si mesmo para o servidor remoto via `scp` e executa `--role db` com um pseudo-terminal alocado. As perguntas interativas aparecem no seu terminal local. As credenciais são salvas em `/root/ocsinventory-credentials-<host>.txt`.
 
 ---
 
-## 6. Referência de flags
+## 6. Instalação do agente nos endpoints
+
+### 6.1 Linux / Unix
+
+```bash
+chmod +x install-ocsinventory-agent.sh
+
+# Interativo (só pergunta a URL do backend/relay)
+sudo ./install-ocsinventory-agent.sh
+
+# Silencioso — backend na porta padrão
+sudo ./install-ocsinventory-agent.sh --url http://IP_BACKEND:8000
+
+# Silencioso — agentes apontando para relay na porta 80
+sudo ./install-ocsinventory-agent.sh --url http://IP_RELAY
+
+# Forçar reinstalação mesmo se a versão já for igual
+sudo ./install-ocsinventory-agent.sh --url http://IP_BACKEND:8000 --force
+
+# Instalar apenas o binário, sem serviço systemd
+sudo ./install-ocsinventory-agent.sh --url http://IP_BACKEND:8000 --no-service
+```
+
+**Distros suportadas:**
+
+| Família | Exemplos | Gerenciador |
+|---|---|---|
+| Debian | Ubuntu, Mint, Kali, Raspbian | `apt-get` |
+| RHEL | AlmaLinux, Rocky, Fedora, CentOS | `dnf` / `yum` |
+| SUSE | openSUSE, SLES | `zypper` |
+| Arch | Arch Linux, Manjaro | `pacman` |
+| Alpine | Alpine Linux | `apk` |
+| Slackware | Slackware | `slackpkg` |
+
+**Fluxo de instalação:**
+```
+1. Detectar família da distro
+2. Instalar dependências base (git, curl, unzip)
+3. Verificar versão instalada → remover versão anterior se necessário
+4. Instalar Dart SDK
+5. Perguntar URL do backend/relay (se não passada via --url)
+6. Clonar repositório do agente (tag 3.0.0-rc1)
+7. Compilar: dart compile exe lib/app/app.dart -o ocsinventory-cli
+8. Instalar via setup/linux/install.sh
+9. Registrar e iniciar serviço systemd / OpenRC
+10. Verificar instalação
+```
+
+### 6.2 Windows
+
+```bat
+:: Interativo (só pergunta a URL)
+install-ocsinventory-agent.bat
+
+:: Silencioso — backend na porta padrão
+install-ocsinventory-agent.bat http://IP_BACKEND:8000
+
+:: Silencioso — agentes apontando para relay na porta 80
+install-ocsinventory-agent.bat http://IP_RELAY
+
+:: Forçar reinstalação
+install-ocsinventory-agent.bat http://IP_BACKEND:8000 /force
+```
+
+> Deve ser executado como **Administrador** (botão direito → "Executar como administrador").
+
+### 6.3 Credenciais do agente
+
+Os scripts usam uma conta de serviço dedicada, sem expor a senha do administrador principal:
+
+| Campo | Valor |
+|---|---|
+| Usuário | `ocsagentes` |
+| Grupo Django | `admin` (permissão de envio de inventário) |
+
+A senha está embutida nos scripts. Para alterar:
+
+```sh
+# Linux — editar no topo do arquivo
+ADMIN_USER="ocsagentes"
+ADMIN_PASS="sua-nova-senha"
+```
+
+```bat
+:: Windows — editar no topo do arquivo
+set "ADMIN_USER=ocsagentes"
+set "ADMIN_PASS=sua-nova-senha"
+```
+
+### 6.4 Atualização automática
+
+Ambos os scripts detectam a versão instalada e decidem automaticamente:
+
+| Situação | Ação |
+|---|---|
+| Nenhuma versão instalada | Instalação limpa |
+| Versão instalada **diferente** da desejada | Remove a anterior e instala a nova |
+| Versão instalada **igual** à desejada | Pergunta se quer reinstalar (ou `--force` / `/force`) |
+
+**O que é removido na desinstalação da versão anterior:**
+- Serviço do sistema (`systemctl stop` + `sc delete` no Windows)
+- Binários em todos os caminhos conhecidos
+- Arquivos de configuração
+- Código-fonte compilado (reclonado na próxima execução)
+- Entradas de registro (Windows) e entradas do PATH
+
+---
+
+## 7. Referência de flags — servidor
 
 ### Gerais
 
 | Flag | Padrão | Descrição |
 |---|---|---|
-| `--role PAPEL` | menu interativo | Papel deste servidor (db, backend, frontend, snmp, app, standalone, db-remote) |
+| `--role PAPEL` | menu interativo | Papel: `db`, `backend`, `frontend`, `snmp`, `app`, `standalone`, `relay`, `db-remote` |
 | `--host IP` | selecionado interativamente | IP deste servidor para comunicação com os outros componentes |
-| `--backend-port PORTA` | `8000` | Porta do backend/API |
+| `--backend-port PORTA` | `8000` | Porta interna do backend/uWSGI |
 | `--frontend-port PORTA` | `8080` | Porta do console web |
+| `--relay-port PORTA` | `80` | Porta pública do relay para os agentes (papel `relay`) |
 | `--base-dir CAMINHO` | `/opt/ocsinventory` | Diretório raiz da instalação |
 | `--ocs-tag TAG` | `3.0.0-rc1` | Tag git a instalar |
 | `--os-upgrade` | pergunta | Atualiza o S.O. sem perguntar |
@@ -368,25 +620,26 @@ O script copia a si mesmo para o servidor remoto via `scp` e executa `--role db`
 
 | Flag | Padrão | Papéis | Descrição |
 |---|---|---|---|
-| `--db-engine mysql\|postgresql` | `mysql` (backend/app), `postgresql` (standalone) | db, backend, app, standalone | Motor do banco |
-| `--db-host HOST` | perguntado | backend, app | Host do banco remoto |
-| `--db-port PORTA` | 5432/3306 | backend, app | Porta do banco remoto |
+| `--db-engine mysql\|postgresql` | `mysql` (backend/app/relay) | todos exceto frontend/snmp | Motor do banco |
+| `--db-host HOST` | perguntado | backend, app, relay | Host do banco remoto |
+| `--db-port PORTA` | 5432/3306 | backend, app, relay | Porta do banco remoto |
 | `--db-name NOME` | `ocsdb` | todos | Nome do banco |
 | `--db-user USUARIO` | `ocsuser` | todos | Usuário do banco |
-| `--db-password SENHA` | gerada ou perguntada | todos | Senha do usuário do banco |
+| `--db-password SENHA` | gerada ou perguntada | todos | Senha do usuário |
 | `--app-host HOST` | perguntado | db | IP do servidor de app a liberar no banco |
 
-### Multi-layer
+### Multi-layer / relay
 
 | Flag | Padrão | Papéis | Descrição |
 |---|---|---|---|
 | `--backend-host HOST` | perguntado | frontend, snmp | Host do servidor de backend |
+| `--relay-port PORTA` | `80` | relay | Porta pública para os agentes |
 
 ### Administrador do console
 
 | Flag | Padrão | Descrição |
 |---|---|---|
-| `--admin-user USUARIO` | `admin` | Usuário administrador |
+| `--admin-user USUARIO` | `admin` | Usuário administrador do console |
 | `--admin-email EMAIL` | `admin@localhost` | E-mail do administrador |
 | `--admin-password SENHA` | gerada aleatoriamente | Senha do administrador |
 | `--snmp-subnet CIDR` | auto-detectada | Subnet varrida pelo SNMP Scanner |
@@ -402,471 +655,312 @@ O script copia a si mesmo para o servidor remoto via `scp` e executa `--role db`
 
 ---
 
-## 7. O que o script instala por papel
+## 8. Referência de flags — agente Linux
 
-| Componente | standalone | db | backend | frontend | snmp | app |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|
-| Banco de dados (local) | ✅ | ✅ | — | — | — | — |
-| Python 3.12 + deps | ✅ | — | ✅ | — | ✅ | ✅ |
-| Django + uWSGI | ✅ | — | ✅ | — | — | ✅ |
-| Node.js 20 + Vue build | ✅ | — | — | ✅ | — | ✅ |
-| Nginx (backend proxy) | ✅ | — | ✅ | — | — | ✅ |
-| Nginx (frontend) | ✅ | — | — | ✅ | — | ✅ |
-| SNMP Scanner | ✅ (opcional) | — | — | — | ✅ | opcional |
-| Dart SDK + agente | ✅ | — (opc.) | ✅ (opc.) | ✅ (opc.) | ✅ (opc.) | ✅ (opc.) |
-| Firewall (portas 8000/8080) | ✅ | — | 8000 | 8080 | — | ✅ |
-| Usuário de sistema `ocs` | ✅ | — | ✅ | ✅ | ✅ | ✅ |
+| Flag | Padrão | Descrição |
+|---|---|---|
+| `--url URL` | perguntado | URL completa do backend ou relay (`http://HOST:PORTA`) |
+| `--tag TAG` | `3.0.0-rc1` | Tag git do agente |
+| `--base DIR` | `/opt/ocsinventory` | Diretório base de instalação |
+| `--no-service` | — | Instalar só o binário, sem serviço systemd/OpenRC |
+| `--force` | — | Reinstalar mesmo se a versão já for a desejada |
 
 ---
 
-## 8. Ordem das etapas
+## 9. Seleção de IP com múltiplas interfaces
 
-### Etapas comuns (todos os papéis)
+Quando o servidor tem mais de uma interface de rede, o script lista todas e pergunta qual usar:
 
-1. Detecção do SO e família de pacotes
-2. Seleção interativa do IP (se múltiplas interfaces)
-3. Instalação dos pacotes base (lista reduzida no papel `db`)
-4. Atualização do SO (pergunta antes — pode reiniciar serviços existentes)
-5. Configuração do firewall
+```
+Este servidor tem 3 interfaces de rede. Qual IP os outros
+componentes devem usar para se conectar a ESTE servidor?
+  [1] IP_INTERFACE_1      (ens160)
+  [2] IP_INTERFACE_2      (ens192)
+  [3] IP_INTERFACE_3      (ens224)
+Escolha [1-3]:
+```
 
-### Papel `db` (encerra aqui)
+O IP selecionado é usado nas URLs do console, nas regras do banco (`pg_hba.conf`, GRANT MySQL) e nas configurações do agente. Para pular a pergunta: `--host IP_DESEJADO`.
 
-6. Detecção/instalação do banco, validação de versão, criação de banco/usuário, liberação de acesso remoto
-
-### Papéis `backend`, `app`, `standalone`
-
-6. Criação do usuário de sistema `ocs`
-7. Conexão com o banco (teste TCP + autenticação) — ou instalação do banco local (`standalone`)
-8. Clone do repositório backend, criação do virtualenv, instalação de dependências Python
-9. Configuração do `.env` (SECRET_KEY, motor/credenciais/host do banco, FRONTEND_REDIRECT)
-10. Migrações Django (cria grupos super-admin/admin/user) + `collectstatic`
-11. Criação do superusuário do console (idempotente)
-12. Configuração do uWSGI + Nginx (porta 8000) + SELinux (RHEL)
-13. Timer systemd de automação (executa `manage.py automation` a cada 5 min — cobre IPDiscover)
-
-### Papéis `frontend`, `app`, `standalone`
-
-14. (Papel `frontend`) Verificação de conectividade TCP com o backend remoto
-15. Clone do repositório frontend, instalação de dependências npm
-16. Build do Vue/Vite com `config.json` apontando para o backend correto
-17. Configuração do Nginx (porta 8080) + SELinux (RHEL)
-
-### Papel `snmp` (dedicado)
-
-18. Verificação de conectividade TCP com o backend remoto
-19. Clone do SNMP Scanner, criação do virtualenv, configuração do `scanner.conf`
-20. Timer systemd (a cada 30 min)
-
-### Etapas opcionais (perguntadas ou controladas via flag)
-
-- **SNMP Scanner** (em `standalone`/`app`): pergunta, padrão "não"
-- **Agente Dart**: pergunta em todos os papéis exceto `db`; padrão "sim" em multi-layer, "sempre" em standalone
+> **Microsegmentação (Guardicore, NSX):** escolha a interface pela qual os outros servidores **realmente** conseguem alcançar este servidor. O script testa a conectividade TCP antes de instalar e informa exatamente qual porta/interface está bloqueada.
 
 ---
 
-## 9. Banco de dados — detalhes
+## 10. Banco de dados — detalhes
 
 ### Detecção automática do motor
 
 Ao rodar `--role db` sem `--db-engine`, o script detecta o que já está instalado:
 
-- **Só MariaDB/MySQL encontrado** → usa esse motor automaticamente
-- **Só PostgreSQL encontrado** → usa PostgreSQL automaticamente
-- **Ambos encontrados** → mostra menu com versão e compatibilidade de cada um para você escolher
-- **Nenhum encontrado** → mostra menu de instalação:
+- **Só MariaDB/MySQL** → usa automaticamente
+- **Só PostgreSQL** → usa automaticamente
+- **Ambos** → mostra menu para escolher
+- **Nenhum** → mostra menu de instalação:
   ```
-  [1] MySQL/MariaDB -- MariaDB 10.11 LTS (via módulo DNF mariadb:10.11 no RHEL 8)
-  [2] PostgreSQL    -- PostgreSQL 15 (via módulo DNF postgresql:15 no RHEL 8)
+  [1] MySQL/MariaDB -- MariaDB 10.11 LTS
+  [2] PostgreSQL    -- PostgreSQL 15
   ```
 
-### Versão mínima e RHEL 8
+### RHEL 8 — módulos DNF
 
-No AlmaLinux/RHEL 8, os módulos padrão trazem versões antigas:
-- MariaDB → 10.3 (EOL, abaixo do mínimo) → o script habilita `mariadb:10.11` via `dnf module`
-- PostgreSQL → 10.x (abaixo do mínimo) → o script habilita `postgresql:15` via `dnf module`
+Os módulos padrão do RHEL 8 trazem versões antigas (MariaDB 10.3, PostgreSQL 10). O script habilita automaticamente os módulos corretos:
+- `dnf module enable mariadb:10.11`
+- `dnf module enable postgresql:15`
 
-### Regras de acesso remoto (`pg_hba.conf`)
+### Regras `pg_hba.conf`
 
-O script sempre grava as regras com **IP + máscara `/32`** em vez de hostname. Isso evita falha silenciosa quando o servidor de banco não consegue resolver o hostname do servidor de app via DNS:
+O script sempre grava regras com **IP + máscara `/32`** em vez de hostname, evitando falha silenciosa quando o servidor de banco não resolve o hostname do servidor de app via DNS:
 
 ```
-# Errado (pode falhar se DNS não resolver):
-host  ocsdb  ocsuser  lnxdcocsapp01  md5
+# Nunca usado pelo script (pode falhar se DNS não resolver):
+host  ocsdb  ocsuser  nome-do-servidor  md5
 
-# Correto (sempre funciona):
-host  ocsdb  ocsuser  10.24.22.90/32  md5
+# Sempre usado pelo script (funciona independente de DNS):
+host  ocsdb  ocsuser  IP_DO_SERVIDOR/32  md5
 ```
 
-### Mover o datadir depois da instalação
+### Mover o datadir após instalação
 
-O script instala sempre no datadir padrão da distro (`/var/lib/mysql` ou `/var/lib/pgsql/data`) e você move depois com janela de manutenção:
+O script instala sempre no datadir padrão e você move depois com janela de manutenção:
 
-**PostgreSQL (RHEL/AlmaLinux):**
+**PostgreSQL:**
 ```bash
 systemctl stop postgresql
-rsync -av /var/lib/pgsql/data/ /seu-novo-datadir/
-chown -R postgres:postgres /seu-novo-datadir
-semanage fcontext -a -t postgresql_db_t "/seu-novo-datadir(/.*)?"
-restorecon -Rv /seu-novo-datadir
+rsync -av /var/lib/pgsql/data/ /novo-datadir/
+chown -R postgres:postgres /novo-datadir
+semanage fcontext -a -t postgresql_db_t "/novo-datadir(/.*)?"
+restorecon -Rv /novo-datadir
 mkdir -p /etc/systemd/system/postgresql.service.d/
-echo -e "[Service]\nEnvironment=PGDATA=/seu-novo-datadir" \
+echo -e "[Service]\nEnvironment=PGDATA=/novo-datadir" \
   > /etc/systemd/system/postgresql.service.d/pgdata.conf
-systemctl daemon-reload
-systemctl start postgresql
+systemctl daemon-reload && systemctl start postgresql
 ```
 
-**MariaDB (RHEL/AlmaLinux):**
+**MariaDB:**
 ```bash
 systemctl stop mariadb
-rsync -av /var/lib/mysql/ /seu-novo-datadir/
-chown -R mysql:mysql /seu-novo-datadir
-semanage fcontext -a -t mysqld_db_t "/seu-novo-datadir(/.*)?"
-restorecon -Rv /seu-novo-datadir
-echo -e "[mysqld]\ndatadir=/seu-novo-datadir" > /etc/my.cnf.d/datadir.cnf
+rsync -av /var/lib/mysql/ /novo-datadir/
+chown -R mysql:mysql /novo-datadir
+semanage fcontext -a -t mysqld_db_t "/novo-datadir(/.*)?"
+restorecon -Rv /novo-datadir
+echo -e "[mysqld]\ndatadir=/novo-datadir" > /etc/my.cnf.d/datadir.cnf
 systemctl start mariadb
 ```
 
 ---
 
-## 10. Particularidades por distro
+## 11. Particularidades por distro
 
 | Situação | O que o script faz |
 |---|---|
-| **RHEL 8 — MariaDB 10.3 instalado por padrão** | `dnf module reset mariadb && dnf module enable mariadb:10.11` antes de instalar |
-| **RHEL 8 — PostgreSQL 10 instalado por padrão** | `dnf module reset postgresql && dnf module enable postgresql:15` antes de instalar |
-| **RHEL — PostgreSQL nunca inicializado** | `postgresql-setup --initdb` automático; detecta e move diretório "sujo" (sem `PG_VERSION`) para backup antes de inicializar |
-| **RHEL — locale inválido** | Instala `glibc-langpack-en` automaticamente e passa `--locale=en_US.UTF-8` ao `initdb` |
-| **RHEL — banco RPM corrompido** (`BDB0091 DB_VERSION_MISMATCH`) | Remove `/var/lib/rpm/__db*` automaticamente na primeira falha e tenta de novo |
-| **RHEL — pg_hba.conf com PGDATA antigo** | Remove `/etc/sysconfig/pgsql/postgresql` e drop-ins systemd de tentativas anteriores antes do `initdb` |
-| **RHEL — SELinux** | `semanage port` para liberar 8000/8080 em `http_port_t`; `semanage fcontext` + `restorecon` nos diretórios do uWSGI e estáticos |
-| **Debian 13 (trixie)** | `software-properties-common` foi removido dessa versão — o script nunca o instala incondicionalmente (só no ramo Ubuntu/deadsnakes) |
-| **Debian — sudo ausente** | Instalado automaticamente (instalações mínimas frequentemente não incluem) |
-| **Git — dubious ownership** | Todos os comandos `git` rodam como usuário `ocs` (dono do diretório), nunca como root |
-| **Nginx — site default conflitante** | Detecta e desabilita automaticamente antes de configurar os vhosts do OCS |
+| RHEL 8 — MariaDB 10.3 por padrão | Habilita `mariadb:10.11` via `dnf module` |
+| RHEL 8 — PostgreSQL 10 por padrão | Habilita `postgresql:15` via `dnf module` |
+| RHEL — PostgreSQL nunca inicializado | `postgresql-setup --initdb` automático; move dir "sujo" para backup |
+| RHEL — locale inválido | Instala `glibc-langpack-en`, passa `--locale=en_US.UTF-8` ao `initdb` |
+| RHEL — banco RPM corrompido (BDB0091) | Remove `/var/lib/rpm/__db*`, `rpm --rebuilddb`, tenta novamente |
+| RHEL — processo `rpm` travado (100% CPU) | Detecta e mata com `SIGKILL` antes de qualquer `pkg_install` |
+| RHEL — pg_hba.conf com PGDATA antigo | Remove `/etc/sysconfig/pgsql/postgresql` e drop-ins systemd |
+| RHEL — SELinux | `semanage port` para 8000/8080/80; `restorecon` nos diretórios |
+| RHEL — Nginx porta 80 conflita com default | Remove automaticamente o server block padrão antes de configurar o relay |
+| Debian 13 — `software-properties-common` removido | Script nunca o instala incondicionalmente |
+| Debian — sudo ausente | Instalado automaticamente |
+| Git — dubious ownership | Todos os `git` rodam como usuário `ocs` (dono do diretório) |
+| Nginx — site default conflitante | Detecta e desabilita antes de configurar os vhosts do OCS |
+| Proxy Squid no ambiente | Todos os curls locais usam `--noproxy '*'` para evitar interceptação |
+| uWSGI — socket some após restart | Unit systemd usa `RuntimeDirectory` + `KillSignal=SIGQUIT` para garantir recriação correta |
 
 ---
 
-## 11. Problemas conhecidos e soluções
+## 12. Problemas conhecidos e soluções
 
-### Porta bloqueada (Guardicore / NSX / ACL de rede)
+### Porta bloqueada (Guardicore / NSX / ACL)
 
-**Sintoma:** `timeout 3 bash -c "echo > /dev/tcp/HOST/PORTA"` retorna `PORTA BLOQUEADA`, mas `ping` funciona.
+**Sintoma:** ping funciona mas conexão TCP trava ou retorna "Connection refused" / "No route to host".
 
-**Causa:** Ferramentas de microsegmentação (Guardicore, VMware NSX Distributed Firewall) aplicam políticas por VM na camada de rede, invisíveis para o SO. O `firewall-cmd`/`ufw` não controla essas regras.
-
-**Solução:** Abrir a regra no console do Guardicore/NSX:
-- Origem: IP do servidor de origem
-- Destino: IP do servidor de destino
-- Porta: a porta necessária (5432, 3306, 8000, 8080)
-- Protocolo: TCP
-
-**Diagnóstico manual:**
+**Diagnóstico:**
 ```bash
-# Testar conectividade TCP direta (sem precisar do cliente do serviço)
+# Testar porta específica
 timeout 3 bash -c "echo > /dev/tcp/IP_DESTINO/PORTA" && echo "ABERTA" || echo "BLOQUEADA"
 
 # Testar várias portas de uma vez
-for porta in 22 3306 5432 8000 8080; do
+for porta in 22 80 3306 5432 8000 8080; do
   timeout 2 bash -c "echo > /dev/tcp/IP_DESTINO/$porta" 2>/dev/null \
     && echo "PORTA $porta: ABERTA" || echo "PORTA $porta: BLOQUEADA"
 done
 ```
 
+**Solução:** abrir regra no Guardicore/NSX com origem, destino, porta e protocolo TCP.
+
 ### PostgreSQL — `pg_hba.conf entry not found`
 
-**Sintoma:** `FATAL: no pg_hba.conf entry for host "X.X.X.X"` ao conectar remotamente.
-
-**Causas e soluções:**
-
-1. **Regra com hostname em vez de IP** (hostname não resolve no servidor de banco):
-   ```bash
-   sed -i 's/lnxdcocsapp01/10.24.22.90\/32/' /var/lib/pgsql/data/pg_hba.conf
-   sudo -u postgres psql -c "SELECT pg_reload_conf();"
-   ```
-
-2. **Regra com IP sem máscara** (formato inválido — `md5` interpretado como máscara):
-   ```bash
-   sed -i 's|10.24.22.90    md5|10.24.22.90/32    md5|' /var/lib/pgsql/data/pg_hba.conf
-   sudo -u postgres psql -c "SELECT pg_reload_conf();"
-   ```
-
-3. **Método de autenticação incompatível** (`scram-sha-256` com cliente antigo):
-   ```bash
-   sed -i 's/scram-sha-256/md5/' /var/lib/pgsql/data/pg_hba.conf
-   sudo -u postgres psql -c "ALTER USER ocsuser WITH PASSWORD 'SENHA';"
-   sudo -u postgres psql -c "SELECT pg_reload_conf();"
-   ```
-
-4. **Verificar qual pg_hba.conf o PostgreSQL está realmente usando:**
-   ```bash
-   sudo -u postgres psql -c "SHOW hba_file;"
-   sudo -u postgres psql -c "SELECT pg_reload_conf();"
-   sudo -u postgres psql -c "SELECT * FROM pg_hba_file_rules WHERE database = '{ocsdb}';"
-   ```
-
-### PostgreSQL — falha ao iniciar após editar pg_hba.conf
-
-**Sintoma:** `systemctl restart postgresql` falha; `journalctl -u postgresql` mostra `invalid IP mask`.
-
-**Causa:** linha no `pg_hba.conf` com IP sem máscara (ex.: `172.18.190.103    md5` em vez de `172.18.190.103/32    md5`).
-
-**Solução:**
 ```bash
-# Ver a linha problemática
+# Ver regras carregadas
+sudo -u postgres psql -c "SELECT * FROM pg_hba_file_rules WHERE database = '{ocsdb}';"
+
+# Corrigir hostname para IP
+sed -i 's/nome-servidor/IP_SERVIDOR\/32/' /var/lib/pgsql/data/pg_hba.conf
+
+# Corrigir IP sem máscara
+sed -i 's|IP_SERVIDOR    md5|IP_SERVIDOR/32    md5|' /var/lib/pgsql/data/pg_hba.conf
+
+# Recarregar
+sudo -u postgres psql -c "SELECT pg_reload_conf();"
+```
+
+### PostgreSQL — não inicia após editar pg_hba.conf
+
+**Sintoma:** `journalctl -u postgresql` mostra `invalid IP mask`.
+
+**Causa:** IP sem máscara `/32` no `pg_hba.conf`.
+
+```bash
 grep -n "ocsuser" /var/lib/pgsql/data/pg_hba.conf
-
-# Corrigir
-sed -i 's|ENDEREÇO_IP    md5|ENDEREÇO_IP/32    md5|' /var/lib/pgsql/data/pg_hba.conf
-
-# Subir o serviço
+sed -i 's|IP_SERVIDOR    md5|IP_SERVIDOR/32    md5|' /var/lib/pgsql/data/pg_hba.conf
 systemctl start postgresql
 ```
 
-### Banco RPM corrompido — BDB0091 DB_VERSION_MISMATCH
+### Banco RPM corrompido — BDB0091
 
-**Sintoma:** `dnf install` falha com `RPM: error: db5 error(-30969) ... BDB0091 DB_VERSION_MISMATCH`.
-
-**Causa:** Arquivos de ambiente do Berkeley DB em `/var/lib/rpm` incompatíveis com a versão atual do `rpm`/`dnf` (comum após restauração de snapshot ou migração de VM).
-
-**Solução manual (o script já faz automaticamente):**
 ```bash
 rm -f /var/lib/rpm/__db*
 rpm --rebuilddb
 ```
 
-### Locale inválido — PostgreSQL initdb falha
+### Processo `rpm` travado (100% CPU, bloqueia systemctl)
 
-**Sintoma:** `/var/lib/pgsql/initdb_postgresql.log` mostra `initdb: error: invalid locale settings`.
+```bash
+# Identificar
+ps aux | grep rpm
 
-**Causa:** `LANG=en_US.utf8` definida mas o langpack não está instalado.
+# Matar
+kill -9 PID_DO_RPM
 
-**Solução:**
+# Limpar e reconstruir
+rm -f /var/lib/rpm/__db*
+rpm --rebuilddb &
+```
+
+### Locale inválido — initdb falha
+
 ```bash
 dnf install -y glibc-langpack-en
 ```
 
----
-
-## 12. Validação pós-instalação
-
-Após a instalação, teste manualmente:
+### uWSGI — socket não criado / backend retorna 502
 
 ```bash
-# Backend respondendo?
-curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/
-# Esperado: 200 ou 301
+# Ver se o socket existe
+ls -la /run/ocsinventory-backend/
 
-# Frontend respondendo?
-curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/
+# Subir manualmente para ver o erro
+sudo -u ocs /opt/ocsinventory/backend/venv/bin/uwsgi \
+  --ini /opt/ocsinventory/backend/uwsgi.ini \
+  --daemonize /var/log/ocsinventory-backend/ocsinventory-backend.log
+sleep 3
+curl --noproxy '*' http://127.0.0.1:8000/api-check/
+```
+
+### Proxy Squid interceptando curls locais
+
+```bash
+# Sempre usar --noproxy para testes locais
+curl --noproxy '*' http://127.0.0.1:8000/api-check/
+curl --noproxy '*' http://127.0.0.1:8080/
+```
+
+### Agente não aparece no console
+
+```bash
+# Verificar serviço
+systemctl status ocsinventory-agent
+
+# Verificar conectividade com o backend
+timeout 3 bash -c "echo > /dev/tcp/IP_BACKEND/8000" && echo OK
+
+# Forçar envio imediato
+ocsinventory-cli --now
+
+# Ver log do agente
+journalctl -u ocsinventory-agent -n 50
+```
+
+---
+
+## 13. Validação pós-instalação
+
+```bash
+# Backend respondendo (sem proxy)
+curl --noproxy '*' -s http://127.0.0.1:8000/api-check/
+# Esperado: {"message":"API is online!"}
+
+# Relay respondendo (porta 80)
+curl --noproxy '*' -s http://127.0.0.1:80/api-check/
+# Esperado: {"message":"API is online!"}
+
+# Frontend respondendo
+curl --noproxy '*' -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/
 # Esperado: 200
 
-# Serviços ativos?
+# Serviços ativos
 systemctl status ocsinventory-backend
 systemctl status nginx
 systemctl list-timers | grep ocsinventory
 ```
 
 **No navegador:**
-1. Acesse `http://IP_DO_FRONTEND:8080`
-2. Login com o usuário/senha do resumo final (ou `/root/ocsinventory-credentials.txt`)
-3. O próprio servidor de instalação deve aparecer no inventário após o primeiro ciclo do agente
-4. Para SNMP: Configuração → SNMP → adicionar comunidade e confirmar que dispositivos da subnet aparecem após o próximo ciclo do timer (30 min)
+1. Acesse `http://IP_FRONTEND:8080`
+2. Login com usuário/senha do resumo final ou `/root/ocsinventory-credentials.txt`
+3. O servidor de instalação deve aparecer no inventário após o primeiro ciclo do agente
+4. Para SNMP: Configuração → SNMP → adicionar comunidade → aguardar próximo ciclo do timer (30 min)
 
 ---
 
-## 13. Logs e credenciais
+## 14. Logs e credenciais
 
 | O quê | Onde |
 |---|---|
-| Log da instalação | `/var/log/ocsinventory-install.log` |
-| Backend (uWSGI) | `/var/log/ocsinventory-backend/` |
+| Log da instalação do servidor | `/var/log/ocsinventory-install.log` |
+| Backend (uWSGI) | `/var/log/ocsinventory-backend/ocsinventory-backend.log` |
+| Relay (Nginx access/error) | `/var/log/ocsinventory-backend/relay-access.log` e `relay-error.log` |
 | Frontend (Nginx) | `/var/log/ocsinventory-frontend/` |
-| Agente | `/var/log/ocsinventory-agent/` |
-| Credenciais (banco + console) | `/root/ocsinventory-credentials.txt` (permissão `600`) |
-| Credenciais do banco remoto (db-remote) | `/root/ocsinventory-credentials-<host>.txt` (permissão `600`) |
+| Agente | `/var/log/ocsinventory-agent/` (ou `journalctl -u ocsinventory-agent`) |
+| Credenciais do servidor (banco + console) | `/root/ocsinventory-credentials.txt` (modo `600`) |
+| Credenciais do banco remoto (db-remote) | `/root/ocsinventory-credentials-<host>.txt` (modo `600`) |
 
 > A senha de root do banco **nunca é salva** em nenhum arquivo.
 
 ---
 
-## 14. Idempotência
+## 15. Idempotência
 
-O script pode ser re-executado sem risco: usuário de sistema, banco, clone git, virtualenv Python e configurações são verificados antes de recriados. Útil para corrigir uma execução que falhou no meio ou atualizar a instalação depois.
+O script pode ser re-executado sem risco: usuário de sistema, banco, clone git, virtualenv Python e configurações são verificados antes de serem recriados. Útil para corrigir uma execução que falhou no meio ou para atualizar a instalação depois.
 
 ---
 
-## 15. Limitações conhecidas
+## 16. Limitações conhecidas
 
 - `3.0.0-rc1` é release candidate; o projeto pede feedback nessa fase.
-- Não existe repositório apt/yum público para o OCS 3.0 ainda — a instalação é sempre a partir do código-fonte.
-- Motor de extensão/plugins completo, CVE e Green IT estão previstos para versões 3.1/3.2.
+- Não existe repositório apt/yum público para o OCS 3.0 — a instalação é sempre a partir do código-fonte.
+- Motor de plugins completo, CVE e Green IT estão previstos para versões 3.1/3.2.
 - Testado de ponta a ponta em AlmaLinux 8.10, Ubuntu 24.04 e Debian 13; outras distros das mesmas famílias devem funcionar mas não foram validadas com a mesma profundidade.
-- Em arquitetura multi-layer sem SSH liberado entre servidores, não há orquestração automática — o resultado do `--role db` é copiado manualmente para o próximo passo. O papel `db-remote` cobre esse gap quando SSH está disponível.
-- O papel `db-remote` precisa do script em arquivo local (`./install-ocsinventory-3.0.sh`) — não funciona via `curl | bash`.
+- Em arquitetura multi-layer sem SSH liberado entre servidores, o resultado do `--role db` é copiado manualmente para o próximo passo. O papel `db-remote` cobre esse gap quando SSH está disponível.
+- O papel `db-remote` precisa do script em arquivo local — não funciona via `curl | bash`.
+- O papel `relay` remove o server block padrão do Nginx na porta 80. Em servidores que hospedam outros sites no Nginx, revise o `/etc/nginx/nginx.conf` e os vhosts antes de usar.
 
 ---
 
-## 16. Licença
+## 17. Licença
 
-Este script é distribuído sob a licença **MIT**. Sinta-se livre para fazer fork, modificar, redistribuir e adaptar da maneira que quiser — para uso pessoal, comercial ou dentro de qualquer outro projeto — desde que o aviso de copyright e a licença original sejam mantidos. Não há garantia de funcionamento; use por sua conta e risco, especialmente em ambientes de produção.
+Distribuído sob a licença **MIT**. Pode ser usado, modificado e redistribuído livremente — para uso pessoal, comercial ou em qualquer projeto — desde que o aviso de copyright seja mantido. Sem garantia de funcionamento; use por sua conta e risco em produção.
 
-O texto completo está no arquivo [`LICENSE`](./LICENSE).
+Texto completo: [`LICENSE`](./LICENSE)
 
 ---
 
-## 17. Referências
+## 18. Referências
 
 - Backend: `github.com/OCSInventory-NG/OCSInventory-Server-Backend-Rework` (tag `3.0.0-rc1`)
 - Frontend: `github.com/OCSInventory-NG/OCSInventory-Server-Frontend-Rework` (tag `3.0.0-rc1`)
 - Agente: `github.com/OCSInventory-NG/OCSInventory-Agent-Rework` (tag `3.0.0-rc1`)
 - SNMP Scanner: `github.com/OCSInventory-NG/OCSInventory-SNMP-Scanner` (tag `3.0.0-rc1`)
 - Pacotes oficiais: `github.com/OCSInventory-NG/OCSInventory-Server-Packages`
-
----
-
-## 18. Instalação do Agente nos Endpoints
-
-O repositório inclui dois scripts dedicados para instalar o agente OCS Inventory nos endpoints inventariados — separados do instalador do servidor, mais leves e portáveis.
-
-### Scripts disponíveis
-
-| Script | Sistema | Arquivo |
-|---|---|---|
-| Linux / Unix | Todas as distros suportadas | `install-ocsinventory-agent.sh` |
-| Windows | Windows 7 SP1+ / Server 2008 R2+ | `install-ocsinventory-agent.bat` |
-
-### Distros suportadas (Linux)
-
-| Família | Exemplos |
-|---|---|
-| Debian | Ubuntu, Mint, Kali, Raspbian, Pop!_OS |
-| RHEL | AlmaLinux, Rocky, Fedora, CentOS, Amazon Linux |
-| SUSE | openSUSE, SLES |
-| Arch | Arch Linux, Manjaro, EndeavourOS |
-| Alpine | Alpine Linux |
-| Slackware | Slackware |
-
-### Credenciais de registro do agente
-
-Os scripts usam uma **conta de serviço dedicada** para registrar os agentes no backend, sem expor a senha do administrador:
-
-| Campo | Valor |
-|---|---|
-| Usuário | `ocsagentes` |
-| Grupo | `admin` (permissão de envio de inventário, sem acesso administrativo completo) |
-
-A senha está embutida nos scripts. Para alterar, edite as linhas no topo de cada arquivo:
-
-```sh
-# Linux (install-ocsinventory-agent.sh)
-ADMIN_USER="ocsagentes"
-ADMIN_PASS="PSWAgente"
-```
-
-```bat
-:: Windows (install-ocsinventory-agent.bat)
-set "ADMIN_USER=ocsagentes"
-set "ADMIN_PASS=PSWAgente"
-```
-
-### Uso — Linux
-
-```bash
-# Tornar executável
-chmod +x install-ocsinventory-agent.sh
-
-# Interativo (só pergunta a URL do backend)
-sudo ./install-ocsinventory-agent.sh
-
-# Silencioso (sem nenhuma pergunta)
-sudo ./install-ocsinventory-agent.sh --url http://10.24.22.90:8000
-
-# Forçar reinstalação mesmo se a versão já for igual
-sudo ./install-ocsinventory-agent.sh --url http://10.24.22.90:8000 --force
-```
-
-**Flags disponíveis:**
-
-| Flag | Padrão | Descrição |
-|---|---|---|
-| `--url URL` | perguntado | URL completa do backend (`http://IP:8000`) |
-| `--tag TAG` | `3.0.0-rc1` | Tag git do agente a instalar |
-| `--base DIR` | `/opt/ocsinventory` | Diretório base de instalação |
-| `--no-service` | — | Instalar só o binário, sem serviço systemd |
-| `--force` | — | Reinstalar mesmo se a versão já for a desejada |
-
-### Uso — Windows
-
-```bat
-:: Interativo (só pergunta a URL)
-install-ocsinventory-agent.bat
-
-:: Silencioso
-install-ocsinventory-agent.bat http://10.24.22.90:8000
-
-:: Forçar reinstalação
-install-ocsinventory-agent.bat http://10.24.22.90:8000 /force
-```
-
-> Deve ser executado como **Administrador** (botão direito → "Executar como administrador").
-
-### Lógica de atualização (upgrade automático)
-
-Ambos os scripts detectam se já existe uma versão instalada e tomam a decisão correta automaticamente:
-
-| Situação | Ação |
-|---|---|
-| Nenhuma versão instalada | Instalação limpa direta |
-| Versão instalada **diferente** da desejada | Remove a anterior automaticamente e instala a nova |
-| Versão instalada **igual** à desejada | Pergunta se quer reinstalar (ou `--force` / `/force` para pular) |
-
-**O que é removido na desinstalação da versão anterior:**
-- Serviço do sistema (`systemctl stop` + `sc delete` no Windows)
-- Binários em todos os caminhos conhecidos
-- Arquivos de configuração
-- Código-fonte compilado (será reclonado)
-- Entradas de registro (Windows) e entradas do PATH
-
-### Fluxo completo do script Linux
-
-```
-1. Detectar família da distro
-2. Instalar dependências base (git, curl, unzip)
-3. Verificar versão instalada → remover se necessária
-4. Instalar Dart SDK (via repositório oficial ou download standalone)
-5. Perguntar URL do backend (se não passada via --url)
-6. Clonar / atualizar repositório do agente (tag 3.0.0-rc1)
-7. Compilar: dart compile exe lib/app/app.dart -o ocsinventory-cli
-8. Instalar via setup/linux/install.sh
-9. Registrar e iniciar serviço systemd / OpenRC
-10. Verificar instalação
-```
-
-### Problemas comuns no agente
-
-**`dart` não encontrado após instalação:**
-```bash
-# Verificar se o symlink existe
-ls -la /usr/local/bin/dart
-
-# Se não existir, recriar
-ln -sf /opt/dart-sdk/bin/dart /usr/local/bin/dart
-```
-
-**Agente não aparece no console após instalação:**
-- Verifique se o serviço está ativo: `systemctl status ocsinventory-agent`
-- Verifique conectividade com o backend: `timeout 3 bash -c "echo > /dev/tcp/IP_BACKEND/8000" && echo OK`
-- Verifique o log do agente: `journalctl -u ocsinventory-agent -n 50`
-- Force um envio imediato: `ocsinventory-cli --now`
-
-**Windows — download falhou:**
-1. Baixe manualmente o instalador em: `https://github.com/OCSInventory-NG/OCSInventory-Agent-Rework/releases`
-2. Coloque o `.exe` na mesma pasta do `.bat`
-3. Execute o `.bat` normalmente — ele detecta o arquivo local e usa
-
-**Proxy no ambiente interceptando o curl/download:**
-```bash
-# Linux: forçar sem proxy
-curl --noproxy '*' -fsSL http://IP_BACKEND:8000/api-check/
-```
-
