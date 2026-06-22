@@ -532,6 +532,39 @@ disable_default_nginx_site_if_needed() {
   fi
 }
 
+# Detecta se o IPv6 esta desabilitado no kernel e remove os 'listen [::]:PORT'
+# do nginx.conf principal -- sem isso o Nginx falha ao iniciar com o erro
+# "socket() [::]:PORT failed (97: Address family not supported by protocol)"
+# que e comum em VMs provisionadas com IPv6 desabilitado (Oracle Linux,
+# RHEL minimalista, containers sem net.ipv6.conf.all.disable_ipv6=0).
+nginx_disable_ipv6_if_needed() {
+  # IPv6 disponivel se /proc/net/if_inet6 existir e nao estiver vazio
+  if [ -s /proc/net/if_inet6 ] 2>/dev/null; then
+    return 0  # IPv6 ok, nada a fazer
+  fi
+
+  local nginx_conf="/etc/nginx/nginx.conf"
+  if [ ! -f "$nginx_conf" ]; then
+    return 0
+  fi
+
+  if grep -q "\[::\]" "$nginx_conf"; then
+    warn "IPv6 desabilitado neste servidor -- removendo 'listen [::]:*' do nginx.conf para evitar falha de socket."
+    cp "$nginx_conf" "${nginx_conf}.bak-ocs-ipv6" 2>/dev/null || true
+    sed -i 's/^\(\s*\)listen\s*\[::\][^;]*;/\1# listen [::] desabilitado (IPv6 indisponivel neste host)/g' "$nginx_conf"
+    info "Backup salvo em ${nginx_conf}.bak-ocs-ipv6"
+  fi
+
+  # Verificar tambem nos conf.d e sites-enabled
+  for dir in /etc/nginx/conf.d /etc/nginx/sites-enabled; do
+    [ -d "$dir" ] || continue
+    grep -rl "\[::\]" "$dir" 2>/dev/null | while read -r f; do
+      warn "Removendo listen [::] em $f (IPv6 indisponivel)."
+      sed -i 's/^\(\s*\)listen\s*\[::\][^;]*;/\1# listen [::] desabilitado (IPv6 indisponivel)/g' "$f"
+    done
+  done
+}
+
 #############################################
 # apt / pacotes
 #############################################
@@ -1839,6 +1872,7 @@ EOF
     selinux_label_path "$BASE_DIR/backend/static" httpd_sys_content_t
   fi
 
+  nginx_disable_ipv6_if_needed
   nginx -t || die "Configuracao do Nginx para o relay esta invalida."
   systemctl reload nginx 2>/dev/null || systemctl restart nginx
 
@@ -2072,6 +2106,7 @@ EOF
     selinux_label_path "$BASE_DIR/backend/static" httpd_sys_content_t
   fi
 
+  nginx_disable_ipv6_if_needed
   nginx -t || die "Configuracao do Nginx para o backend esta invalida."
   systemctl reload nginx 2>/dev/null || systemctl restart nginx
 
@@ -2178,6 +2213,7 @@ EOF
     selinux_label_path "$BASE_DIR/frontend/dist" httpd_sys_content_t
   fi
 
+  nginx_disable_ipv6_if_needed
   nginx -t || die "Configuracao do Nginx para o frontend esta invalida."
   systemctl reload nginx 2>/dev/null || systemctl restart nginx
 

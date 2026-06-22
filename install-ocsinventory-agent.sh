@@ -377,22 +377,23 @@ ask_credentials() { :; }
 # Clonar repositorio
 # ---------------------------------------------------------------------------
 clone_agent() {
+  # Usa variavel global AGENT_SRC (nao command substitution) para evitar
+  # que info()/section() sejam capturados junto com o caminho.
+  AGENT_SRC="${BASE_DIR}/agent-src"
   section "Codigo-fonte do agente"
-  local agent_src="${BASE_DIR}/agent-src"
   mkdir -p "$BASE_DIR"
 
-  if [ -d "${agent_src}/.git" ]; then
+  if [ -d "${AGENT_SRC}/.git" ]; then
     info "Repositorio existente -- buscando tag ${OCS_TAG}..."
-    git -C "$agent_src" fetch --tags --quiet
-    git -C "$agent_src" checkout "$OCS_TAG" --quiet 2>/dev/null \
-      || git -C "$agent_src" checkout main --quiet
+    # Garantir que o dono seja o usuario atual (root) ou adicionar safe.directory
+    # para evitar "dubious ownership" quando o diretorio foi criado por outro usuario
+    git config --global --add safe.directory "$AGENT_SRC" 2>/dev/null || true
+    git -C "$AGENT_SRC" fetch --tags --quiet
+    git -C "$AGENT_SRC" checkout "$OCS_TAG" --quiet 2>/dev/null       || git -C "$AGENT_SRC" checkout main --quiet
   else
     info "Clonando repositorio (tag ${OCS_TAG})..."
-    git clone --depth 1 --branch "$OCS_TAG" "$GIT_AGENT_URL" "$agent_src" 2>/dev/null \
-      || { git clone "$GIT_AGENT_URL" "$agent_src"; git -C "$agent_src" checkout "$OCS_TAG" 2>/dev/null || true; }
+    git clone --depth 1 --branch "$OCS_TAG" "$GIT_AGENT_URL" "$AGENT_SRC" 2>/dev/null       || { git clone "$GIT_AGENT_URL" "$AGENT_SRC"; git -C "$AGENT_SRC" checkout "$OCS_TAG" 2>/dev/null || true; }
   fi
-
-  echo "$agent_src"
 }
 
 # ---------------------------------------------------------------------------
@@ -400,11 +401,10 @@ clone_agent() {
 # ---------------------------------------------------------------------------
 build_agent() {
   section "Compilando agente"
-  local agent_src="$1"
-  cd "$agent_src"
+  cd "$AGENT_SRC"
   dart pub get
   dart compile exe lib/app/app.dart -o ocsinventory-cli
-  info "Binario: ${agent_src}/ocsinventory-cli"
+  info "Binario: ${AGENT_SRC}/ocsinventory-cli"
 }
 
 # ---------------------------------------------------------------------------
@@ -412,22 +412,14 @@ build_agent() {
 # ---------------------------------------------------------------------------
 run_agent_installer() {
   section "Instalando agente"
-  local agent_src="$1"
-  cp "${agent_src}/ocsinventory-cli" "${agent_src}/setup/linux/"
-  chmod +x "${agent_src}/setup/linux/install.sh" "${agent_src}/setup/linux/uninstall.sh"
+  cp "${AGENT_SRC}/ocsinventory-cli" "${AGENT_SRC}/setup/linux/"
+  chmod +x "${AGENT_SRC}/setup/linux/install.sh" "${AGENT_SRC}/setup/linux/uninstall.sh"
 
   local service_flag=""
   [ "$INSTALL_SERVICE" -eq 1 ] && service_flag="--service --now"
 
   # shellcheck disable=SC2086
-  cd "${agent_src}/setup/linux" && ./install.sh \
-    --silent \
-    --url "$BACKEND_URL" \
-    --username "$ADMIN_USER" \
-    --password "$ADMIN_PASS" \
-    --mode 1 \
-    --log-level 3 \
-    $service_flag
+  cd "${AGENT_SRC}/setup/linux" && ./install.sh     --silent     --url "$BACKEND_URL"     --username "$ADMIN_USER"     --password "$ADMIN_PASS"     --mode 1     --log-level 3     $service_flag
 }
 
 # ---------------------------------------------------------------------------
@@ -469,9 +461,9 @@ info "  Usuario : $ADMIN_USER (conta de servico dedicada)"
 info "  Versao  : $OCS_TAG"
 printf "\n"
 
-agent_src=$(clone_agent)
-build_agent "$agent_src"
-run_agent_installer "$agent_src"
+clone_agent
+build_agent
+run_agent_installer
 verify_install
 
 printf "\n"
