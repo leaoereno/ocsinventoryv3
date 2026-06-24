@@ -917,6 +917,11 @@ clone_or_checkout() {
     # como root, para nao acionar a protecao "dubious ownership" do git
     # (o git se recusa a operar num repositorio cujo dono difere do EUID
     # de quem o esta chamando). git -C evita precisar de subshell com cd.
+    # Garante tambem que o dono seja OCS_SYS_USER antes de tentar operar,
+    # pois em re-execucoes o diretorio pode ter sido criado como root.
+    chown -R "$OCS_SYS_USER":"$OCS_SYS_USER" "$dest" 2>/dev/null || true
+    # safe.directory como fallback para o caso do git ainda reclamar
+    git config --global --add safe.directory "$dest" 2>/dev/null || true
     sudo -u "$OCS_SYS_USER" git -C "$dest" fetch --tags --force
     sudo -u "$OCS_SYS_USER" git -C "$dest" checkout "$tag" --force
   else
@@ -2242,13 +2247,22 @@ install_and_configure_snmp() {
   local subnet="${SNMP_SUBNET:-$(detect_subnet)}"
   mkdir -p "$BASE_DIR/snmp-scanner/mibs"
 
+  # Quando o papel e snmp dedicado, BACKEND_HOST aponta para o servidor remoto.
+  # Nos outros papeis (app/standalone), o backend e local (127.0.0.1).
+  local snmp_backend_url
+  if [ -n "$BACKEND_HOST" ]; then
+    snmp_backend_url="http://${BACKEND_HOST}:${BACKEND_PORT}"
+  else
+    snmp_backend_url="http://127.0.0.1:${BACKEND_PORT}"
+  fi
+
   cat > "$BASE_DIR/snmp-scanner/config/scanner.conf" <<EOF
 [auth]
-ocs_user = ${ADMIN_USER}
-ocs_password = ${ADMIN_PASSWORD}
+ocs_user = ocsagentes
+ocs_password = PSWAgente
 
 [api]
-ocs_base_url = http://127.0.0.1:${BACKEND_PORT}
+ocs_base_url = ${snmp_backend_url}
 
 [scanner]
 scanner_mode = ONLINE
@@ -2856,6 +2870,7 @@ main() {
   # --- Papel snmp dedicado ---
   if [ "$ROLE" = "snmp" ]; then
     run_required "Verificacao do backend remoto" setup_snmp_role
+    run_required "Python 3.12"                   ensure_python312
     run_required "SNMP Scanner"                  install_and_configure_snmp
   fi
 
