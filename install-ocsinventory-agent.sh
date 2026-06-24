@@ -448,7 +448,7 @@ install_dart() {
     armv7*)        dart_arch="arm" ;;
     *)             dart_arch="x64" ;;
   esac
-  curl -fsSL "https://storage.googleapis.com/dart-archive/channels/stable/release/latest/sdk/dartsdk-linux-${dart_arch}-release.zip" \
+  curl -fsSL --max-time 600 "https://storage.googleapis.com/dart-archive/channels/stable/release/latest/sdk/dartsdk-linux-${dart_arch}-release.zip" \
     -o "$dart_zip" || die "Falha ao baixar Dart SDK."
   rm -rf /opt/dart-sdk
   unzip -q "$dart_zip" -d /opt
