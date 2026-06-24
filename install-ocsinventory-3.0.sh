@@ -558,10 +558,12 @@ nginx_disable_ipv6_if_needed() {
   # Verificar tambem nos conf.d e sites-enabled
   for dir in /etc/nginx/conf.d /etc/nginx/sites-enabled; do
     [ -d "$dir" ] || continue
+    # grep -rl retorna codigo 1 quando nao encontra nada -- usar || true
+    # para nao derrubar o script com set -e
     grep -rl "\[::\]" "$dir" 2>/dev/null | while read -r f; do
       warn "Removendo listen [::] em $f (IPv6 indisponivel)."
       sed -i 's/^\(\s*\)listen\s*\[::\][^;]*;/\1# listen [::] desabilitado (IPv6 indisponivel)/g' "$f"
-    done
+    done || true
   done
 }
 
