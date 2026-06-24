@@ -116,7 +116,10 @@ pkg_install() {
       local stuck
       stuck=$(ps -eo pid,stat,comm 2>/dev/null | awk '/[Rr]pm/ && /D/{print $1}' || true)
       [ -n "$stuck" ] && { warn "Processo rpm travado (PID $stuck) -- matando."; kill -9 $stuck 2>/dev/null || true; sleep 2; }
-      $PKG_MGR install -y "$@"
+      # Desabilitar repos externos conhecidos que podem estar desatualizados ou
+      # indisponiveis (pgdg antigas, repos de terceiros) para nao travar o dnf
+      # em metadados que nao sao necessarios para instalar as dependencias do agente.
+      $PKG_MGR install -y         --disablerepo="pgdg9*"         --disablerepo="pgdg10"         --disablerepo="pgdg11"         --disablerepo="pgdg12"         --disablerepo="pgdg13"         "$@" 2>/dev/null || $PKG_MGR install -y "$@"
       ;;
     suse)      zypper install -y "$@" ;;
     arch)      pacman -Sy --noconfirm "$@" ;;
