@@ -285,7 +285,11 @@ test_agent_report() {
   # 3. Testar autenticacao
   info "3. Testando autenticacao (usuario: ${ADMIN_USER})..."
   local token_resp
-  token_resp=$(curl --noproxy '*' -fsS --max-time 5     -X POST "http://${relay_ip}:${relay_port}/api-auth/token"     -H "Content-Type: application/json"     -d "{"username":"${ADMIN_USER}","password":"${ADMIN_PASS}"}" 2>/dev/null || true)
+  local auth_body="{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASS}\"}"
+  token_resp=$(curl --noproxy '*' -fsS --max-time 10 \
+    -X POST "http://${relay_ip}:${relay_port}/api-auth/token" \
+    -H "Content-Type: application/json" \
+    -d "$auth_body" 2>/dev/null || true)
   if echo "$token_resp" | grep -q '"token"'; then
     printf "${GRN}[INFO]${NC}   Autenticacao → ${GRN}OK${NC} (token obtido)\n"
   else
