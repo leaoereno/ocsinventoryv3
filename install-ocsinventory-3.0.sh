@@ -2709,7 +2709,7 @@ enable_services_on_boot() {
   info "$services_enabled servico(s) habilitados para iniciar apos o reboot."
 
   # Verificar status final de todos
-  section "Status dos servicos apos configuracao"
+  info "--- Status dos servicos apos configuracao ---"
   for svc in \
       ocsinventory-backend \
       nginx \

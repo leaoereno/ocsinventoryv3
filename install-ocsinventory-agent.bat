@@ -549,6 +549,36 @@ powershell -ExecutionPolicy Bypass -Command ^
      }" >nul 2>&1
 
 :: ---------------------------------------------------------------------------
+:: Agendar execucao horaria via Agendador de Tarefas do Windows
+:: O servico OCS fica em background, mas o agendador garante envio
+:: de inventario a cada 1 hora independente do estado do servico.
+:: ---------------------------------------------------------------------------
+echo [INFO] Configurando tarefa agendada (execucao a cada 1 hora)...
+
+:: Remover tarefa anterior se existir
+schtasks /delete /tn "OCSInventoryAgent" /f >nul 2>&1
+
+:: Criar tarefa que roda a cada 1 hora, para sempre, iniciando na proxima hora cheia
+schtasks /create ^
+    /tn "OCSInventoryAgent" ^
+    /tr ""%INSTALL_DIR%\ocsinventory-cli.exe" --url "!BACKEND_URL!" --username "%ADMIN_USER%" --password "%ADMIN_PASS%" --mode 1 --log_level 2 --log_file true --log_file_path "%DATA_DIR%\ocsinventory.log"" ^
+    /sc HOURLY ^
+    /mo 1 ^
+    /ru SYSTEM ^
+    /rl HIGHEST ^
+    /f >nul 2>&1
+
+if not errorlevel 1 (
+    echo [INFO] Tarefa agendada criada: OCSInventoryAgent ^(a cada 1 hora^)
+) else (
+    echo [AVISO] Nao foi possivel criar a tarefa agendada -- verifique o Agendador de Tarefas.
+)
+
+:: Executar imediatamente uma vez para registrar o inventario agora
+echo [INFO] Executando inventario inicial...
+schtasks /run /tn "OCSInventoryAgent" >nul 2>&1
+
+:: ---------------------------------------------------------------------------
 :: Verificar resultado
 :: ---------------------------------------------------------------------------
 echo.
@@ -586,6 +616,7 @@ echo   Log inst.: %LOG_FILE%
 echo.
 echo   Comandos uteis:
 echo     Iniciar  : sc start !SERVICE_NAME!
+echo     Tarefa   : schtasks /query /tn "OCSInventoryAgent" /fo LIST
 echo     Parar    : sc stop !SERVICE_NAME!
 echo     Status   : sc query !SERVICE_NAME!
 echo     Executar : "%INSTALL_DIR%\%AGENT_CLI%" --now

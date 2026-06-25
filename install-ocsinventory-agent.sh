@@ -940,6 +940,46 @@ EOF
     systemctl daemon-reload
     systemctl restart ocsinventory-agent 2>/dev/null || true
     info "Servico reiniciado com os parametros corretos."
+
+    # Criar timer systemd para forcar execucao a cada 1 hora
+    # O backend define a frequencia via core.json (padrao: 4h),
+    # mas este timer garante execucao horaria independente do servidor.
+    info "Criando timer systemd para execucao a cada 1 hora..."
+    cat > /etc/systemd/system/ocsinventory-agent-hourly.timer << EOF
+[Unit]
+Description=OCS Inventory Agent -- execucao horaria forcada
+After=network.target
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+Unit=ocsinventory-agent-run.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    cat > /etc/systemd/system/ocsinventory-agent-run.service << EOF
+[Unit]
+Description=OCS Inventory Agent -- execucao pontual (disparado pelo timer)
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/ocsinventory-cli \
+  --url ${BACKEND_URL} \
+  --username ${ADMIN_USER} \
+  --password ${ADMIN_PASS} \
+  --mode 1 \
+  --log_level 2 \
+  --log_file true \
+  --log_file_path /var/log/ocsinventory-agent/ocsinventory-agent.log
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now ocsinventory-agent-hourly.timer 2>/dev/null || true
+    info "Timer horario ativo: ocsinventory-agent-hourly.timer"
   fi
 
   # Fallback: instalar cron quando systemd nao estiver disponivel ou nao suportar o servico
@@ -950,8 +990,8 @@ EOF
       mkdir -p /var/log/ocsinventory-agent
       cat > /etc/cron.d/ocsinventory-agent << CRONEOF
 # OCS Inventory Agent -- fallback cron (systemd nao disponivel)
-# Executa a cada 4 horas (mesma frequencia configurada no servidor)
-0 */4 * * * root /usr/bin/ocsinventory-cli \
+# Executa a cada 1 hora
+0 * * * * root /usr/bin/ocsinventory-cli \
   --url ${BACKEND_URL} \
   --username ${ADMIN_USER} \
   --password ${ADMIN_PASS} \
@@ -961,7 +1001,7 @@ EOF
   --log_file_path /var/log/ocsinventory-agent/ocsinventory-agent.log >> /var/log/ocsinventory-agent/cron.log 2>&1
 CRONEOF
       chmod 644 /etc/cron.d/ocsinventory-agent
-      info "Cron configurado: /etc/cron.d/ocsinventory-agent (execucao a cada 4 horas)"
+      info "Cron configurado: /etc/cron.d/ocsinventory-agent (execucao a cada 1 hora)"
     fi
   fi
 }
