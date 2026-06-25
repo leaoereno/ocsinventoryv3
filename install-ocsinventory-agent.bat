@@ -33,6 +33,29 @@ set "FORCE_REINSTALL=0"
 set "AGENT_DOWNLOAD_URL=https://github.com/OCSInventory-NG/OCSInventory-Agent-Rework/releases/download/%OCS_VERSION%/%AGENT_EXE%"
 
 :: ---------------------------------------------------------------------------
+:: Servidores OCS conhecidos -- edite conforme o ambiente crescer
+:: Formato: set "RELAY_N_IP=IP" e set "RELAY_N_DESC=Nome do Site"
+set "RELAY_1_IP=10.24.22.93"       & set "RELAY_1_DESC=Omnichannel"
+set "RELAY_2_IP=10.24.55.30"       & set "RELAY_2_DESC=DC Lapa Servers (lnxdczabprod02)"
+set "RELAY_3_IP=10.24.55.31"       & set "RELAY_3_DESC=SNOC"
+set "RELAY_4_IP=10.24.55.32"       & set "RELAY_4_DESC=DC Lapa Redes"
+set "RELAY_5_IP=10.24.127.56"      & set "RELAY_5_DESC=DC Makenzie"
+set "RELAY_6_IP=10.24.21.157"      & set "RELAY_6_DESC=Bradesco GVP"
+set "RELAY_7_IP=10.230.22.199"     & set "RELAY_7_DESC=Globalhitss"
+set "RELAY_8_IP=172.27.0.39"       & set "RELAY_8_DESC=CLOUD"
+set "RELAY_9_IP=172.28.118.124"    & set "RELAY_9_DESC=OPENSTACK-EDGE01"
+set "RELAY_10_IP=172.28.118.125"   & set "RELAY_10_DESC=OPENSTACK-EDGE02"
+set "RELAY_11_IP=172.20.201.95"    & set "RELAY_11_DESC=DCV-01"
+set "RELAY_12_IP=172.20.201.98"    & set "RELAY_12_DESC=DCV-02"
+set "RELAY_13_IP=10.40.201.124"    & set "RELAY_13_DESC=FEDERADO01"
+set "RELAY_14_IP=10.40.201.125"    & set "RELAY_14_DESC=FEDERADO02"
+set "RELAY_15_IP=172.19.118.124"   & set "RELAY_15_DESC=Openstack EDGE-BSA01"
+set "RELAY_16_IP=172.19.118.125"   & set "RELAY_16_DESC=Openstack EDGE-BSA02"
+set "RELAY_17_IP=172.18.118.124"   & set "RELAY_17_DESC=Openstack EDGE-CTA01"
+set "RELAY_18_IP=172.18.118.125"   & set "RELAY_18_DESC=Openstack EDGE-CTA02"
+set "RELAY_COUNT=18"
+
+:: ---------------------------------------------------------------------------
 :: Verificar argumentos
 :: ---------------------------------------------------------------------------
 set "BACKEND_URL="
@@ -206,22 +229,84 @@ if "!NEED_REMOVE!"=="1" (
 :: Coletar parametros de conexao
 :: ---------------------------------------------------------------------------
 :collect_params
-echo [INFO] === Configuracao do backend ===
+echo [INFO] === Selecao do Servidor OCS ===
 
-if "!BACKEND_URL!"=="" (
+if not "!BACKEND_URL!"=="" goto :url_defined
+
+echo.
+echo   Selecione o servidor OCS para onde o agente ira se reportar:
+echo.
+echo   [ 1]  !RELAY_1_IP!        !RELAY_1_DESC!
+echo   [ 2]  !RELAY_2_IP!        !RELAY_2_DESC!
+echo   [ 3]  !RELAY_3_IP!        !RELAY_3_DESC!
+echo   [ 4]  !RELAY_4_IP!        !RELAY_4_DESC!
+echo   [ 5]  !RELAY_5_IP!       !RELAY_5_DESC!
+echo   [ 6]  !RELAY_6_IP!       !RELAY_6_DESC!
+echo   [ 7]  !RELAY_7_IP!     !RELAY_7_DESC!
+echo   [ 8]  !RELAY_8_IP!        !RELAY_8_DESC!
+echo   [ 9]  !RELAY_9_IP!    !RELAY_9_DESC!
+echo   [10]  !RELAY_10_IP!    !RELAY_10_DESC!
+echo   [11]  !RELAY_11_IP!       !RELAY_11_DESC!
+echo   [12]  !RELAY_12_IP!       !RELAY_12_DESC!
+echo   [13]  !RELAY_13_IP!      !RELAY_13_DESC!
+echo   [14]  !RELAY_14_IP!      !RELAY_14_DESC!
+echo   [15]  !RELAY_15_IP!    !RELAY_15_DESC!
+echo   [16]  !RELAY_16_IP!    !RELAY_16_DESC!
+echo   [17]  !RELAY_17_IP!    !RELAY_17_DESC!
+echo   [18]  !RELAY_18_IP!    !RELAY_18_DESC!
+echo   [19]  Informar manualmente
+echo.
+
+set /p "RELAY_ESCOLHA=  Escolha [1-19]: "
+
+if "!RELAY_ESCOLHA!"=="1"  set "BACKEND_URL=http://!RELAY_1_IP!"
+if "!RELAY_ESCOLHA!"=="2"  set "BACKEND_URL=http://!RELAY_2_IP!"
+if "!RELAY_ESCOLHA!"=="3"  set "BACKEND_URL=http://!RELAY_3_IP!"
+if "!RELAY_ESCOLHA!"=="4"  set "BACKEND_URL=http://!RELAY_4_IP!"
+if "!RELAY_ESCOLHA!"=="5"  set "BACKEND_URL=http://!RELAY_5_IP!"
+if "!RELAY_ESCOLHA!"=="6"  set "BACKEND_URL=http://!RELAY_6_IP!"
+if "!RELAY_ESCOLHA!"=="7"  set "BACKEND_URL=http://!RELAY_7_IP!"
+if "!RELAY_ESCOLHA!"=="8"  set "BACKEND_URL=http://!RELAY_8_IP!"
+if "!RELAY_ESCOLHA!"=="9"  set "BACKEND_URL=http://!RELAY_9_IP!"
+if "!RELAY_ESCOLHA!"=="10" set "BACKEND_URL=http://!RELAY_10_IP!"
+if "!RELAY_ESCOLHA!"=="11" set "BACKEND_URL=http://!RELAY_11_IP!"
+if "!RELAY_ESCOLHA!"=="12" set "BACKEND_URL=http://!RELAY_12_IP!"
+if "!RELAY_ESCOLHA!"=="13" set "BACKEND_URL=http://!RELAY_13_IP!"
+if "!RELAY_ESCOLHA!"=="14" set "BACKEND_URL=http://!RELAY_14_IP!"
+if "!RELAY_ESCOLHA!"=="15" set "BACKEND_URL=http://!RELAY_15_IP!"
+if "!RELAY_ESCOLHA!"=="16" set "BACKEND_URL=http://!RELAY_16_IP!"
+if "!RELAY_ESCOLHA!"=="17" set "BACKEND_URL=http://!RELAY_17_IP!"
+if "!RELAY_ESCOLHA!"=="18" set "BACKEND_URL=http://!RELAY_18_IP!"
+if "!RELAY_ESCOLHA!"=="19" (
     echo.
-    echo   Informe a URL do backend do OCS Inventory.
-    echo   Exemplo: http://10.24.22.90:8000
-    echo.
-    set /p "BACKEND_URL=  URL do backend: "
+    set /p "BACKEND_URL=  URL ou IP do relay (ex.: http://IP ou http://IP:PORTA): "
     if "!BACKEND_URL!"=="" (
         echo [ERRO] URL obrigatoria.
         pause & exit /b 1
     )
+    :: Adicionar http:// se o usuario digitou apenas o IP
+    echo !BACKEND_URL! | findstr /i "^http" >nul 2>&1 || set "BACKEND_URL=http://!BACKEND_URL!"
 )
 
+if "!BACKEND_URL!"=="" (
+    echo [ERRO] Opcao invalida: !RELAY_ESCOLHA!. Escolha entre 1 e 19.
+    pause & exit /b 1
+)
+
+:: Perguntar tag de identificacao do ativo
+echo.
+set /p "AGENT_TAG=  Tag do ativo no console (ex.: ITSM-DEVOPS, NOC, INFRA - Enter para pular): "
+if not "!AGENT_TAG!"=="" (
+    echo [INFO] Tag definida: !AGENT_TAG!
+) else (
+    echo [INFO] Sem tag definida.
+)
+
+:url_defined
 :: Remover barra final
 if "!BACKEND_URL:~-1!"=="/" set "BACKEND_URL=!BACKEND_URL:~0,-1!"
+
+echo [INFO] Servidor OCS selecionado: !BACKEND_URL!
 
 :: Credenciais ja definidas (conta de servico ocsagentes)
 

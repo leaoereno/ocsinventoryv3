@@ -40,12 +40,14 @@ INSTALL_SERVICE=1
 FORCE_REINSTALL=0
 GIT_AGENT_URL="https://github.com/OCSInventory-NG/OCSInventory-Agent-Rework.git"
 BUNDLE_DIR=""           # caminho do bundle offline; auto-detectado se vazio
+INSTALL_LOG="/var/log/ocsinventory-install.log"   # log persistente da instalação
+AGENT_TAG=""            # tag de identificação do ativo no console (ex.: ITSM-DEVOPS)
 AGENT_SERVICE_NAME="ocsinventory-agent"
 
 RED='\033[0;31m'; YEL='\033[1;33m'; GRN='\033[0;32m'; BLU='\033[0;34m'; NC='\033[0m'
-info()    { printf "${GRN}[INFO]${NC}   %s\n" "$*"; }
-warn()    { printf "${YEL}[AVISO]${NC}  %s\n" "$*" >&2; }
-die()     { printf "${RED}[ERRO]${NC}   %s\n" "$*" >&2; exit 1; }
+info()    { printf "\${GRN}[INFO]\${NC}   %s\n" "$*"; echo "[INFO]  $*" >> "\${INSTALL_LOG}" 2>/dev/null || true; }
+warn()    { printf "\${YEL}[AVISO]\${NC}  %s\n" "$*" >&2; echo "[AVISO] $*" >> "\${INSTALL_LOG}" 2>/dev/null || true; }
+die()     { printf "\${RED}[ERRO]\${NC}   %s\n" "$*" >&2; echo "[ERRO]  $*" >> "\${INSTALL_LOG}" 2>/dev/null || true; exit 1; }
 section() { printf "\n${BLU}>>> %s${NC}\n" "$*"; }
 
 # ---------------------------------------------------------------------------
@@ -588,12 +590,111 @@ install_dart() {
 # ---------------------------------------------------------------------------
 # URL do backend
 # ---------------------------------------------------------------------------
+
+# Lista de relays/servidores OCS conhecidos
+# Formato: NUMERO|IP|NOME_DO_SITE
+# Adicione novas linhas conforme o ambiente crescer.
+OCS_RELAYS="
+  1|10.24.22.93|Omnichannel
+  2|10.24.55.30|DC Lapa Servers (lnxdczabprod02)
+  3|10.24.55.31|SNOC
+  4|10.24.55.32|DC Lapa Redes
+  5|10.24.127.56|DC Makenzie
+  6|10.24.21.157|Bradesco GVP
+  7|10.230.22.199|Globalhitss
+  8|172.27.0.39|CLOUD
+  9|172.28.118.124|OPENSTACK-EDGE01
+  10|172.28.118.125|OPENSTACK-EDGE02
+  11|172.20.201.95|DCV-01
+  12|172.20.201.98|DCV-02
+  13|10.40.201.124|FEDERADO01
+  14|10.40.201.125|FEDERADO02
+  15|172.19.118.124|Openstack EDGE-BSA01
+  16|172.19.118.125|Openstack EDGE-BSA02
+  17|172.18.118.124|Openstack EDGE-CTA01
+  18|172.18.118.125|Openstack EDGE-CTA02
+"
+
+# Pergunta a tag de identificação do ativo (opcional)
+ask_agent_tag() {
+  [ -n "$AGENT_TAG" ] && return 0
+  printf "  Tag de identificacao do ativo no console (ex.: ITSM-DEVOPS, NOC, INFRA)
+"
+  printf "  Deixe em branco para nao definir tag: "
+  read -r input_tag
+  AGENT_TAG="${input_tag}"
+  [ -n "$AGENT_TAG" ] && info "Tag definida: $AGENT_TAG" || info "Sem tag definida."
+}
+
 ask_backend_url() {
   [ -n "$BACKEND_URL" ] && return 0
-  printf "\n  URL do backend OCS Inventory (ex.: http://IP:8000 ou http://IP): "
-  read -r input_url
-  [ -z "$input_url" ] && die "URL do backend e obrigatoria."
-  BACKEND_URL="${input_url%/}"
+
+  printf "
+"
+  printf "  Selecione o servidor OCS para onde o agente ira se reportar:
+"
+  printf "  %-5s %-20s %s
+" "Opcao" "IP do Relay" "Site / Descricao"
+  printf "  %s
+" "------------------------------------------------------------"
+
+  # Exibir relays da lista
+  echo "$OCS_RELAYS" | grep -v "^[[:space:]]*$" | while IFS="|" read -r num ip desc; do
+    num=$(echo "$num" | tr -d ' ')
+    ip=$(echo "$ip"   | tr -d ' ')
+    desc=$(echo "$desc" | sed 's/^ *//')
+    [ -z "$ip" ] && continue
+    printf "  [%2s] %-20s %s
+" "$num" "$ip" "$desc"
+  done
+
+  # Calcular próximo número para opção manual
+  local last_num
+  last_num=$(echo "$OCS_RELAYS" | grep -v "^[[:space:]]*$" | tail -1 | cut -d'|' -f1 | tr -d ' ')
+  local manual_num=$((last_num + 1))
+
+  printf "  [%2s] %-20s %s
+" "$manual_num" "---" "Informar manualmente"
+  printf "
+"
+  printf "  Escolha [1-%s]: " "$manual_num"
+  read -r escolha
+  escolha=$(echo "$escolha" | tr -d ' ')
+
+  # Verificar se é a opção manual
+  if [ "$escolha" = "$manual_num" ]; then
+    printf "  URL ou IP do relay (ex.: http://IP ou http://IP:PORTA): "
+    read -r input_url
+    [ -z "$input_url" ] && die "URL do relay e obrigatoria."
+    BACKEND_URL="${input_url%/}"
+    [ "${BACKEND_URL#http}" = "$BACKEND_URL" ] && BACKEND_URL="http://${BACKEND_URL}"
+    info "Relay manual: $BACKEND_URL"
+    return 0
+  fi
+
+  # Verificar se o número corresponde a um relay da lista
+  local found_ip
+  found_ip=$(echo "$OCS_RELAYS" | grep -v "^[[:space:]]*$" | while IFS="|" read -r num ip desc; do
+    num=$(echo "$num" | tr -d ' ')
+    ip=$(echo "$ip"   | tr -d ' ')
+    [ "$num" = "$escolha" ] && echo "$ip" && break
+  done)
+
+  if [ -n "$found_ip" ]; then
+    BACKEND_URL="http://${found_ip}"
+    info "Relay selecionado: $BACKEND_URL"
+    return 0
+  fi
+
+  # Aceitar IP ou URL digitada diretamente
+  if echo "$escolha" | grep -qE "^[0-9]+\.[0-9]+|^http"; then
+    BACKEND_URL="${escolha%/}"
+    [ "${BACKEND_URL#http}" = "$BACKEND_URL" ] && BACKEND_URL="http://${BACKEND_URL}"
+    info "Relay direto: $BACKEND_URL"
+    return 0
+  fi
+
+  die "Opcao invalida: $escolha. Escolha um numero entre 1 e $manual_num."
 }
 
 # Credenciais fixas (conta de servico dedicada)
@@ -658,6 +759,12 @@ run_agent_installer() {
   local cfg_dir="/etc/ocsinventory-agent"
   mkdir -p "$cfg_dir" /var/log/ocsinventory-agent /var/lib/ocsinventory-data
   info "Gravando ${cfg_dir}/config.json com URL: ${BACKEND_URL}"
+
+  # Construir campo tag (opcional)
+  local tag_field=""
+  [ -n "$AGENT_TAG" ] && tag_field=",
+  \"tag\": \"${AGENT_TAG}\""
+
   cat > "${cfg_dir}/config.json" << CFGEOF
 {
   "url": "${BACKEND_URL}",
@@ -669,9 +776,11 @@ run_agent_installer() {
   "log_file_path": "/var/log/ocsinventory-agent/ocsinventory-agent.log",
   "data_directory": "/var/lib/ocsinventory-data",
   "certificate": "none",
-  "bypass-certificate": false
+  "bypass-certificate": false$(printf '%b' "$tag_field")
 }
 CFGEOF
+
+  [ -n "$AGENT_TAG" ] && info "Tag configurada: ${AGENT_TAG}"
 
   # Criar override systemd para injetar parametros na unit gerada pelo
   # install.sh (que usa apenas "--service true" sem URL/credenciais).
@@ -695,6 +804,29 @@ EOF
     systemctl daemon-reload
     systemctl restart ocsinventory-agent 2>/dev/null || true
     info "Servico reiniciado com os parametros corretos."
+  fi
+
+  # Fallback: instalar cron quando systemd nao estiver disponivel ou nao suportar o servico
+  # Garante execucao periodica em sistemas mais antigos (Slackware, containers, etc.)
+  if ! command -v systemctl >/dev/null 2>&1 ||      ! systemctl is-active --quiet ocsinventory-agent 2>/dev/null; then
+    if command -v crontab >/dev/null 2>&1 || [ -d /etc/cron.d ]; then
+      info "Configurando cron como fallback (systemd indisponivel ou servico inativo)..."
+      mkdir -p /var/log/ocsinventory-agent
+      cat > /etc/cron.d/ocsinventory-agent << CRONEOF
+# OCS Inventory Agent -- fallback cron (systemd nao disponivel)
+# Executa a cada 4 horas (mesma frequencia configurada no servidor)
+0 */4 * * * root /usr/bin/ocsinventory-cli \
+  --url ${BACKEND_URL} \
+  --username ${ADMIN_USER} \
+  --password ${ADMIN_PASS} \
+  --mode 1 \
+  --log_level 2 \
+  --log_file true \
+  --log_file_path /var/log/ocsinventory-agent/ocsinventory-agent.log >> /var/log/ocsinventory-agent/cron.log 2>&1
+CRONEOF
+      chmod 644 /etc/cron.d/ocsinventory-agent
+      info "Cron configurado: /etc/cron.d/ocsinventory-agent (execucao a cada 4 horas)"
+    fi
   fi
 }
 
@@ -732,6 +864,12 @@ verify_install() {
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+# Inicializar log de instalacao
+mkdir -p "$(dirname "$INSTALL_LOG")" 2>/dev/null || true
+echo "" >> "$INSTALL_LOG" 2>/dev/null || true
+echo "=== Inicio da instalacao $(date) ===" >> "$INSTALL_LOG" 2>/dev/null || true
+info "Log de instalacao: $INSTALL_LOG"
+
 detect_distro
 detect_bundle || true
 probe_internet_agent
@@ -745,6 +883,7 @@ fi
 install_base_deps
 check_and_remove
 install_dart_agent
+ask_agent_tag
 ask_backend_url
 
 info "Configuracao:"
@@ -760,4 +899,9 @@ verify_install
 
 printf "\n"
 info "Concluido. O agente se reportara para: $BACKEND_URL"
+[ -n "$AGENT_TAG" ] && info "Tag do ativo: $AGENT_TAG"
 [ "$INSTALL_SERVICE" -eq 1 ] && info "Status: systemctl status $AGENT_SERVICE_NAME"
+echo "=== Instalacao concluida em $(date) ===" >> "$INSTALL_LOG" 2>/dev/null || true
+echo "    Relay  : $BACKEND_URL" >> "$INSTALL_LOG" 2>/dev/null || true
+echo "    Tag    : ${AGENT_TAG:-nao definida}" >> "$INSTALL_LOG" 2>/dev/null || true
+echo "    Log    : $INSTALL_LOG" >> "$INSTALL_LOG" 2>/dev/null || true
