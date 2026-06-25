@@ -27,6 +27,8 @@ set "TEMP_DIR=%TEMP%\ocs-install-%RANDOM%"
 set "LOG_FILE=%TEMP_DIR%\install.log"
 set "AGENT_EXE=OCSInventory-Agent-Windows-%OCS_VERSION%.exe"
 set "AGENT_CLI=ocsinventory-cli.exe"
+set "INSTALL_LOG=%SystemRoot%\Temp\ocsinventory-install.log"
+set "AGENT_TAG="
 set "SERVICE_NAME=OCSInventoryAgent"
 set "FORCE_REINSTALL=0"
 
@@ -77,6 +79,9 @@ echo   OCS Inventory 3.0 ^| Instalador / Atualizador
 echo   Versao alvo: %OCS_VERSION%
 echo =======================================================
 echo.
+
+:: Exibir IPs e testar conectividade antes de perguntar o relay
+call :show_network_info
 
 :: ---------------------------------------------------------------------------
 :: Verificar privilegios de Administrador
@@ -227,6 +232,128 @@ if "!NEED_REMOVE!"=="1" (
 
 :: ---------------------------------------------------------------------------
 :: Coletar parametros de conexao
+:: ---------------------------------------------------------------------------
+:: Exibir IPs da maquina e testar conectividade com os relays conhecidos
+:: ---------------------------------------------------------------------------
+:show_network_info
+echo.
+echo [INFO] === Interfaces de rede desta maquina ===
+echo.
+ipconfig | findstr /i "Adaptador\|IPv4\|IPv6\|Endereco"
+echo.
+echo [INFO] === Testando conectividade com os relays OCS ===
+echo.
+echo   Opcao  IP                     Site                        Status
+echo   -----------------------------------------------------------------------
+
+for /L %%N in (1,1,!RELAY_COUNT!) do (
+    call set "_IP=%%RELAY_%%N_IP%%"
+    call set "_DESC=%%RELAY_%%N_DESC%%"
+    if not "!_IP!"=="" (
+        powershell -ExecutionPolicy Bypass -Command ^
+            "$ip='!_IP!'; $ports=@(80,8000); $ok=$false; ^
+             foreach($p in $ports){ try{ $t=New-Object System.Net.Sockets.TcpClient; ^
+             $t.Connect($ip,$p); if($t.Connected){$ok=$true;$okport=$p;$t.Close();break} }catch{} }; ^
+             if($ok){Write-Host '  [%%N]  '+$ip.PadRight(22)+'  '+'!_DESC!'.PadRight(28)+'  ALCANCAVEL :'+$okport -ForegroundColor Green} ^
+             else{Write-Host '  [%%N]  '+$ip.PadRight(22)+'  '+'!_DESC!'.PadRight(28)+'  INACESSIVEL' -ForegroundColor Red}"
+    )
+)
+
+echo.
+echo [AVISO] Se nenhum relay aparecer como ALCANCAVEL, verifique firewall/Guardicore.
+echo [AVISO] O agente NAO conseguira se registrar se a porta estiver bloqueada.
+echo.
+goto :eof
+
+:: ---------------------------------------------------------------------------
+:: Teste de comunicacao pos-instalacao
+:: ---------------------------------------------------------------------------
+:test_agent_report
+echo.
+echo [INFO] === Teste de comunicacao pos-instalacao ===
+
+:: Extrair IP e porta do BACKEND_URL
+set "RELAY_IP_TEST=!BACKEND_URL!"
+set "RELAY_IP_TEST=!RELAY_IP_TEST:http://=!"
+set "RELAY_IP_TEST=!RELAY_IP_TEST:https://=!"
+for /f "tokens=1 delims=/" %%A in ("!RELAY_IP_TEST!") do set "RELAY_IP_TEST=%%A"
+for /f "tokens=1 delims=:" %%A in ("!RELAY_IP_TEST!") do set "RELAY_HOST_TEST=%%A"
+set "RELAY_PORT_TEST=80"
+echo !BACKEND_URL! | findstr ":[0-9]" >nul 2>&1 && (
+    for /f "tokens=2 delims=:" %%A in ("!RELAY_IP_TEST!") do set "RELAY_PORT_TEST=%%A"
+)
+
+:: 1. Teste TCP
+echo [INFO] 1. Testando conectividade TCP com !RELAY_HOST_TEST!:!RELAY_PORT_TEST!...
+powershell -ExecutionPolicy Bypass -Command ^
+    "try{ $t=New-Object System.Net.Sockets.TcpClient; ^
+     $t.Connect('!RELAY_HOST_TEST!',!RELAY_PORT_TEST!); ^
+     if($t.Connected){Write-Host '[INFO]    TCP !RELAY_HOST_TEST!:!RELAY_PORT_TEST! -> ABERTA' -ForegroundColor Green; $t.Close()} ^
+    }catch{ Write-Host '[AVISO]   TCP !RELAY_HOST_TEST!:!RELAY_PORT_TEST! -> BLOQUEADA' -ForegroundColor Red}"
+
+:: 2. Teste API /api-check/
+echo [INFO] 2. Testando API do relay...
+powershell -ExecutionPolicy Bypass -Command ^
+    "try{ $r=[System.Net.WebRequest]::Create('http://!RELAY_HOST_TEST!:!RELAY_PORT_TEST!/api-check/'); ^
+     $r.Timeout=5000; $s=$r.GetResponse(); $b=New-Object System.IO.StreamReader($s.GetResponseStream()); ^
+     $c=$b.ReadToEnd(); ^
+     if($c -like '*API is online*'){Write-Host '[INFO]    API /api-check/ -> OK: '+$c -ForegroundColor Green} ^
+     else{Write-Host '[AVISO]   API resp: '+$c -ForegroundColor Yellow} ^
+    }catch{ Write-Host '[AVISO]   API /api-check/ -> sem resposta: '+$_.Exception.Message -ForegroundColor Yellow}"
+
+:: 3. Teste autenticacao
+echo [INFO] 3. Testando autenticacao (usuario: %ADMIN_USER%)...
+powershell -ExecutionPolicy Bypass -Command ^
+    "$body='{"username":"%ADMIN_USER%","password":"%ADMIN_PASS%"}'; ^
+     try{ $r=[System.Net.WebRequest]::Create('http://!RELAY_HOST_TEST!:!RELAY_PORT_TEST!/api-auth/token'); ^
+     $r.Method='POST'; $r.ContentType='application/json'; $r.Timeout=5000; ^
+     $b=[System.Text.Encoding]::UTF8.GetBytes($body); $r.ContentLength=$b.Length; ^
+     $r.GetRequestStream().Write($b,0,$b.Length); ^
+     $s=$r.GetResponse(); $rd=New-Object System.IO.StreamReader($s.GetResponseStream()); ^
+     $c=$rd.ReadToEnd(); ^
+     if($c -like '*token*'){Write-Host '[INFO]    Autenticacao -> OK (token obtido)' -ForegroundColor Green} ^
+     else{Write-Host '[AVISO]   Autenticacao -> FALHOU: '+$c -ForegroundColor Red} ^
+    }catch{ Write-Host '[AVISO]   Autenticacao -> FALHOU: '+$_.Exception.Message -ForegroundColor Red}"
+
+:: 4. Forcar envio de inventario
+echo [INFO] 4. Forcando envio de inventario...
+set "TEST_LOG=%TEMP%\ocs-test-%RANDOM%.log"
+if exist "%INSTALL_DIR%\ocsinventory-cli.exe" (
+    "%INSTALL_DIR%\ocsinventory-cli.exe" ^
+        --url "!BACKEND_URL!" ^
+        --username "%ADMIN_USER%" ^
+        --password "%ADMIN_PASS%" ^
+        --mode 1 ^
+        --log_level 3 ^
+        --log_file true ^
+        --log_file_path "%TEST_LOG%" 2>nul
+
+    findstr /i "created\|updated\|successfully" "%TEST_LOG%" >nul 2>&1 && (
+        echo [INFO]    Inventario -^> ENVIADO COM SUCESSO
+        findstr /i "created\|updated\|successfully" "%TEST_LOG%"
+    ) || (
+        findstr /i "No route\|not available\|refused" "%TEST_LOG%" >nul 2>&1 && (
+            echo [AVISO]   Inventario -^> FALHOU ^(sem rota para o relay^)
+        ) || (
+            echo [AVISO]   Resultado inconclusivo -- veja: %TEST_LOG%
+        )
+    )
+) else (
+    echo [AVISO]   Binario ocsinventory-cli.exe nao encontrado em %INSTALL_DIR%
+)
+
+:: 5. Resumo
+echo.
+echo   ====== Resumo do teste ======
+echo   Relay     : !BACKEND_URL!
+echo   Usuario   : %ADMIN_USER%
+if not "!AGENT_TAG!"=="" echo   Tag       : !AGENT_TAG!
+echo   Log teste : %TEST_LOG%
+echo   Log inst. : %INSTALL_LOG%
+echo   ==============================
+echo.
+goto :eof
+
 :: ---------------------------------------------------------------------------
 :collect_params
 echo [INFO] === Selecao do Servidor OCS ===
@@ -463,6 +590,8 @@ echo     Parar    : sc stop !SERVICE_NAME!
 echo     Status   : sc query !SERVICE_NAME!
 echo     Executar : "%INSTALL_DIR%\%AGENT_CLI%" --now
 echo =======================================================
+
+call :test_agent_report
 
 :end_clean
 :: Limpar temporarios

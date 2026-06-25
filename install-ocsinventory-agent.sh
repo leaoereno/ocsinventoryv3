@@ -196,6 +196,137 @@ install_dart_agent() {
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
+# Exibe os IPs da maquina e testa conectividade com cada relay da lista
+# ---------------------------------------------------------------------------
+show_network_info() {
+  section "Informacoes de rede desta maquina"
+
+  # Listar todas as interfaces e IPs
+  info "Interfaces de rede detectadas:"
+  printf "  %-20s %-18s %s\n" "Interface" "IP" "MAC"
+  printf "  %s\n" "------------------------------------------------------"
+  ip -o addr show 2>/dev/null | grep "inet " | while read -r line; do
+    local iface ip_cidr ip mac
+    iface=$(echo "$line" | awk '{print $2}')
+    ip_cidr=$(echo "$line" | awk '{print $4}')
+    ip="${ip_cidr%%/*}"
+    mac=$(ip link show "$iface" 2>/dev/null | awk '/ether/{print $2}')
+    [ "$iface" = "lo" ] && continue
+    printf "  %-20s %-18s %s\n" "$iface" "$ip" "${mac:--}"
+  done
+
+  echo ""
+  info "Testando conectividade com os relays OCS conhecidos..."
+  printf "  %-6s %-22s %-22s %s\n" "Opcao" "IP" "Site" "Status"
+  printf "  %s\n" "---------------------------------------------------------------"
+
+  echo "$OCS_RELAYS" | grep -v "^[[:space:]]*$" | while IFS="|" read -r num ip desc; do
+    num=$(echo "$num" | tr -d ' ')
+    ip=$(echo "$ip"   | tr -d ' ')
+    desc=$(echo "$desc" | sed 's/^ *//')
+    [ -z "$ip" ] && continue
+
+    local status color
+    if timeout 3 bash -c "echo >/dev/tcp/${ip}/80" 2>/dev/null; then
+      status="ALCANCAVEL :80"
+      color="${GRN}"
+    elif timeout 3 bash -c "echo >/dev/tcp/${ip}/8000" 2>/dev/null; then
+      status="ALCANCAVEL :8000"
+      color="${GRN}"
+    else
+      status="INACESSIVEL"
+      color="${RED}"
+    fi
+
+    printf "  [%2s] %-22s %-22s ${color}%s${NC}\n" "$num" "$ip" "$desc" "$status"
+  done
+
+  echo ""
+  warn "Se nenhum relay aparecer como ALCANCAVEL, verifique as regras de firewall/Guardicore."
+  warn "O agente NAO conseguira se registrar se a porta estiver bloqueada."
+  echo ""
+}
+
+# ---------------------------------------------------------------------------
+# Testa se o agente está se reportando corretamente ao relay
+# ---------------------------------------------------------------------------
+test_agent_report() {
+  section "Teste de comunicacao pos-instalacao"
+
+  local test_log="/tmp/ocs-agent-test-$$.log"
+  local relay_ip="${BACKEND_URL#http://}"
+  relay_ip="${relay_ip#https://}"
+  relay_ip="${relay_ip%%/*}"
+  relay_ip="${relay_ip%%:*}"
+  local relay_port="80"
+  echo "${BACKEND_URL}" | grep -q ":[0-9]" && relay_port=$(echo "$BACKEND_URL" | grep -oE ":[0-9]+" | tr -d ':')
+
+  # 1. Testar conectividade TCP
+  info "1. Testando conectividade TCP com ${relay_ip}:${relay_port}..."
+  if timeout 3 bash -c "echo >/dev/tcp/${relay_ip}/${relay_port}" 2>/dev/null; then
+    info "   TCP ${relay_ip}:${relay_port} → ${GRN}ABERTA${NC}"
+  else
+    warn "   TCP ${relay_ip}:${relay_port} → ${RED}BLOQUEADA${NC}"
+    warn "   O agente nao consegue alcancara o relay. Verifique Guardicore/firewall."
+    return 1
+  fi
+
+  # 2. Testar API /api-check/
+  info "2. Testando API do relay..."
+  local api_resp
+  api_resp=$(curl --noproxy '*' -fsS --max-time 5     "http://${relay_ip}:${relay_port}/api-check/" 2>/dev/null || true)
+  if echo "$api_resp" | grep -q "API is online"; then
+    info "   API /api-check/ → ${GRN}OK${NC} (${api_resp})"
+  else
+    warn "   API /api-check/ → ${YEL}sem resposta esperada${NC} (resp: ${api_resp:-vazia})"
+  fi
+
+  # 3. Testar autenticacao
+  info "3. Testando autenticacao (usuario: ${ADMIN_USER})..."
+  local token_resp
+  token_resp=$(curl --noproxy '*' -fsS --max-time 5     -X POST "http://${relay_ip}:${relay_port}/api-auth/token"     -H "Content-Type: application/json"     -d "{"username":"${ADMIN_USER}","password":"${ADMIN_PASS}"}" 2>/dev/null || true)
+  if echo "$token_resp" | grep -q '"token"'; then
+    info "   Autenticacao → ${GRN}OK${NC} (token obtido)"
+  else
+    warn "   Autenticacao → ${RED}FALHOU${NC} (resp: ${token_resp:-vazia})"
+    warn "   Verifique se o usuario '${ADMIN_USER}' existe e tem permissao no backend."
+    return 1
+  fi
+
+  # 4. Forcar envio de inventario e verificar resultado
+  info "4. Forcando envio de inventario ao relay..."
+  if command -v ocsinventory-cli >/dev/null 2>&1; then
+    ocsinventory-cli       --url "$BACKEND_URL"       --username "$ADMIN_USER"       --password "$ADMIN_PASS"       --mode 1       --log_level 3       --log_file true       --log_file_path "$test_log" 2>/dev/null || true
+
+    if grep -q "Inventory created\|Inventory updated\|completed successfully" "$test_log" 2>/dev/null; then
+      info "   Inventario → ${GRN}ENVIADO COM SUCESSO${NC}"
+      grep -E "created|updated|successfully" "$test_log" | tail -3 | while read -r line; do
+        info "   $line"
+      done
+    elif grep -q "API is not available\|No route to host\|Connection refused" "$test_log" 2>/dev/null; then
+      warn "   Inventario → ${RED}FALHOU${NC} (sem rota para o relay)"
+      warn "   Verifique conectividade TCP e regras de firewall."
+    else
+      warn "   Inventario → ${YEL}resultado inconclusivo${NC} -- veja: $test_log"
+    fi
+  else
+    warn "   Binario ocsinventory-cli nao encontrado no PATH."
+  fi
+
+  # 5. Resumo final
+  echo ""
+  printf "  ${BLU}════ Resumo do teste ════${NC}\n"
+  printf "  Relay     : %s\n" "$BACKEND_URL"
+  printf "  Usuario   : %s\n" "$ADMIN_USER"
+  [ -n "$AGENT_TAG" ] && printf "  Tag       : %s\n" "$AGENT_TAG"
+  printf "  Log teste : %s\n" "$test_log"
+  printf "  Log inst. : %s\n" "$INSTALL_LOG"
+  echo ""
+
+  rm -f "$test_log"
+}
+
+# ---------------------------------------------------------------------------
 # Detectar familia da distro
 # ---------------------------------------------------------------------------
 detect_distro() {
@@ -883,6 +1014,7 @@ fi
 install_base_deps
 check_and_remove
 install_dart_agent
+show_network_info
 ask_agent_tag
 ask_backend_url
 
@@ -896,6 +1028,7 @@ clone_agent
 build_agent
 run_agent_installer
 verify_install
+test_agent_report
 
 printf "\n"
 info "Concluido. O agente se reportara para: $BACKEND_URL"
