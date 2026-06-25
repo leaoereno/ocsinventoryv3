@@ -914,20 +914,92 @@ setup_firewall() {
     return 0
   fi
 
-  # Papel relay: abre a porta publica do relay (80 por padrao) em vez de BACKEND_PORT
+  # Papel relay: adiciona regras de firewall SE ja estiver instalado e ativo.
+  # Nao instala o firewall -- respeita a configuracao existente do servidor.
   if [ "$ROLE" = "relay" ]; then
-    info "Papel 'relay': abrindo porta ${RELAY_PORT}/tcp no firewall (porta publica dos agentes)..."
+    info "Papel 'relay': adicionando regras de firewall (porta ${RELAY_PORT}/tcp)..."
     case "$PKG_FAMILY" in
       debian)
-        if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+        if command -v ufw >/dev/null 2>&1 && ufw status | grep -qi "Status: active"; then
+          ufw allow OpenSSH >/dev/null 2>&1 || true
           ufw allow "${RELAY_PORT}/tcp" >/dev/null 2>&1 || true
+          info "ufw: porta ${RELAY_PORT}/tcp liberada."
+          ufw status numbered | grep -E "80|${RELAY_PORT}" || true
+        elif command -v ufw >/dev/null 2>&1; then
+          warn "ufw instalado mas inativo -- adicionando regra sem ativar."
+          ufw allow "${RELAY_PORT}/tcp" >/dev/null 2>&1 || true
+        else
+          warn "ufw nao encontrado -- adicione manualmente: porta ${RELAY_PORT}/tcp."
         fi
         ;;
       rhel)
-        if systemctl is-active --quiet firewalld 2>/dev/null; then
-          firewall-cmd --permanent --add-port="${RELAY_PORT}/tcp" >/dev/null 2>&1 || true
+        if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+          # firewalld ativo: adicionar regras diretamente
+          firewall-cmd --permanent --add-service=ssh   >/dev/null 2>&1 || true
+          firewall-cmd --permanent --add-port="${RELAY_PORT}/tcp"   >/dev/null 2>&1 || true
+          firewall-cmd --permanent --add-port="${BACKEND_PORT}/tcp" >/dev/null 2>&1 || true
           firewall-cmd --reload >/dev/null 2>&1 || true
+          info "firewalld: portas ${RELAY_PORT}/tcp e ${BACKEND_PORT}/tcp liberadas."
+          info "Portas abertas: $(firewall-cmd --list-ports 2>/dev/null)"
+        elif command -v firewall-cmd >/dev/null 2>&1 && ! systemctl is-active --quiet firewalld 2>/dev/null; then
+          # firewalld instalado mas inativo: adicionar regra persistente sem iniciar
+          warn "firewalld instalado mas inativo -- adicionando regra permanente sem iniciar o servico."
+          firewall-cmd --permanent --add-port="${RELAY_PORT}/tcp"   >/dev/null 2>&1 || true
+          firewall-cmd --permanent --add-port="${BACKEND_PORT}/tcp" >/dev/null 2>&1 || true
+          warn "Inicie o firewalld manualmente quando conveniente: systemctl start firewalld"
+        elif command -v iptables >/dev/null 2>&1; then
+          # Fallback: iptables direto (sem firewalld)
+          warn "firewalld nao encontrado -- usando iptables como fallback."
+          iptables -I INPUT -p tcp --dport "${RELAY_PORT}"   -j ACCEPT 2>/dev/null || true
+          iptables -I INPUT -p tcp --dport "${BACKEND_PORT}" -j ACCEPT 2>/dev/null || true
+          # Tentar persistir via iptables-save
+          if command -v iptables-save >/dev/null 2>&1; then
+            iptables-save > /etc/sysconfig/iptables 2>/dev/null || \
+            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+          fi
+          info "iptables: portas ${RELAY_PORT}/tcp e ${BACKEND_PORT}/tcp liberadas."
+        else
+          warn "Nenhum gerenciador de firewall detectado."
+          warn "Adicione manualmente a regra para a porta ${RELAY_PORT}/tcp."
         fi
+        ;;
+      suse)
+        if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+          firewall-cmd --permanent --add-port="${RELAY_PORT}/tcp"   >/dev/null 2>&1 || true
+          firewall-cmd --permanent --add-port="${BACKEND_PORT}/tcp" >/dev/null 2>&1 || true
+          firewall-cmd --reload >/dev/null 2>&1 || true
+          info "firewalld (SUSE): portas ${RELAY_PORT}/tcp e ${BACKEND_PORT}/tcp liberadas."
+        elif command -v SuSEfirewall2 >/dev/null 2>&1; then
+          warn "SuSEfirewall2 detectado -- adicione a porta ${RELAY_PORT} manualmente em FW_SERVICES_EXT_TCP."
+        else
+          warn "Nenhum firewall SUSE detectado -- adicione a porta ${RELAY_PORT}/tcp manualmente."
+        fi
+        ;;
+      arch)
+        if command -v ufw >/dev/null 2>&1 && ufw status | grep -qi "Status: active"; then
+          ufw allow "${RELAY_PORT}/tcp" >/dev/null 2>&1 || true
+          info "ufw (Arch): porta ${RELAY_PORT}/tcp liberada."
+        elif command -v iptables >/dev/null 2>&1; then
+          iptables -I INPUT -p tcp --dport "${RELAY_PORT}" -j ACCEPT 2>/dev/null || true
+          info "iptables (Arch): porta ${RELAY_PORT}/tcp liberada."
+        else
+          warn "Nenhum firewall detectado (Arch) -- adicione a porta ${RELAY_PORT}/tcp manualmente."
+        fi
+        ;;
+      alpine)
+        if command -v iptables >/dev/null 2>&1; then
+          iptables -I INPUT -p tcp --dport "${RELAY_PORT}"   -j ACCEPT 2>/dev/null || true
+          iptables -I INPUT -p tcp --dport "${BACKEND_PORT}" -j ACCEPT 2>/dev/null || true
+          # Persistir via awall ou iptables-save
+          command -v rc-service >/dev/null 2>&1 && rc-service iptables save 2>/dev/null || \
+          iptables-save > /etc/iptables/rules-save 2>/dev/null || true
+          info "iptables (Alpine): portas ${RELAY_PORT}/tcp e ${BACKEND_PORT}/tcp liberadas."
+        else
+          warn "Nenhum firewall detectado (Alpine) -- adicione a porta ${RELAY_PORT}/tcp manualmente."
+        fi
+        ;;
+      *)
+        warn "Familia de distro desconhecida -- adicione a porta ${RELAY_PORT}/tcp manualmente no firewall."
         ;;
     esac
     return 0
@@ -2582,6 +2654,78 @@ install_agent() {
 #############################################
 # Validacao final / resumo
 #############################################
+#############################################
+# Habilitar todos os servicos OCS no boot
+# Garante que apos qualquer reboot os servicos
+# subam automaticamente sem intervencao manual.
+#############################################
+enable_services_on_boot() {
+  info "Habilitando servicos OCS para iniciar apos o reboot..."
+
+  local services_enabled=0
+
+  # Backend uWSGI
+  if systemctl list-unit-files 2>/dev/null | grep -q "ocsinventory-backend.service"; then
+    systemctl enable ocsinventory-backend 2>/dev/null && \
+      info "  ocsinventory-backend     : habilitado no boot" && services_enabled=$((services_enabled+1)) || \
+      warn "  ocsinventory-backend     : falha ao habilitar"
+  fi
+
+  # Nginx (frontend e relay)
+  if systemctl list-unit-files 2>/dev/null | grep -q "nginx.service"; then
+    systemctl enable nginx 2>/dev/null && \
+      info "  nginx                    : habilitado no boot" && services_enabled=$((services_enabled+1)) || \
+      warn "  nginx                    : falha ao habilitar"
+  fi
+
+  # Timer de automacao
+  if systemctl list-unit-files 2>/dev/null | grep -q "ocsinventory-automation.timer"; then
+    systemctl enable ocsinventory-automation.timer 2>/dev/null && \
+      info "  ocsinventory-automation  : habilitado no boot" && services_enabled=$((services_enabled+1)) || \
+      warn "  ocsinventory-automation  : falha ao habilitar"
+  fi
+
+  # SNMP Scanner timer
+  if systemctl list-unit-files 2>/dev/null | grep -q "ocsinventory-snmp-scanner.timer"; then
+    systemctl enable ocsinventory-snmp-scanner.timer 2>/dev/null && \
+      info "  ocsinventory-snmp-scanner: habilitado no boot" && services_enabled=$((services_enabled+1)) || \
+      warn "  ocsinventory-snmp-scanner: falha ao habilitar"
+  fi
+
+  # Agente OCS
+  if systemctl list-unit-files 2>/dev/null | grep -q "ocsinventory-agent.service"; then
+    systemctl enable ocsinventory-agent 2>/dev/null && \
+      info "  ocsinventory-agent       : habilitado no boot" && services_enabled=$((services_enabled+1)) || \
+      warn "  ocsinventory-agent       : falha ao habilitar"
+  fi
+
+  # Firewalld (garantir que o firewall tambem sobe no reboot)
+  if systemctl list-unit-files 2>/dev/null | grep -q "firewalld.service"; then
+    systemctl enable firewalld 2>/dev/null && \
+      info "  firewalld                : habilitado no boot" && services_enabled=$((services_enabled+1)) || \
+      warn "  firewalld                : falha ao habilitar"
+  fi
+
+  info "$services_enabled servico(s) habilitados para iniciar apos o reboot."
+
+  # Verificar status final de todos
+  section "Status dos servicos apos configuracao"
+  for svc in \
+      ocsinventory-backend \
+      nginx \
+      ocsinventory-automation.timer \
+      ocsinventory-snmp-scanner.timer \
+      ocsinventory-agent \
+      firewalld; do
+    if systemctl list-unit-files 2>/dev/null | grep -q "${svc}"; then
+      local enabled_status active_status
+      enabled_status=$(systemctl is-enabled "$svc" 2>/dev/null || echo "desconhecido")
+      active_status=$(systemctl is-active "$svc" 2>/dev/null || echo "inativo")
+      printf "  %-35s boot: %-12s estado: %s\n" "$svc" "$enabled_status" "$active_status"
+    fi
+  done
+}
+
 validate_install() {
   # Usar --noproxy para evitar que o Squid (ou qualquer proxy HTTP do
   # ambiente) intercepte a conexao local e retorne erro de gateway.
@@ -3092,6 +3236,7 @@ main() {
     run_required "Backend - timer de automacao"     backend_setup_automation_timer
     decide_optional_components
     run_optional "Agente local (Dart)" install_agent
+    run_required "Habilitar servicos no boot" enable_services_on_boot
     validate_install
     print_summary
     return 0
@@ -3136,6 +3281,7 @@ main() {
   fi
   run_optional "Agente local (Dart)" install_agent
 
+  run_required "Habilitar servicos no boot" enable_services_on_boot
   validate_install
   print_summary
 }
