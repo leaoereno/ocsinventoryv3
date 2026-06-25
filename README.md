@@ -35,6 +35,7 @@ Conjunto de scripts para instalação, atualização e distribuição do **OCS I
 16. [Limitações conhecidas](#16-limitações-conhecidas)
 17. [Licença](#17-licença)
 18. [Referências](#18-referências)
+19. [Instalação offline — Bundle](#19-instalação-offline--bundle)
 
 ---
 
@@ -126,6 +127,7 @@ O script apresenta um menu interativo ao ser executado sem `--role`:
 | `install-ocsinventory-3.0.sh` | Instalação e configuração dos **servidores** (backend, frontend, banco, relay, etc.) |
 | `install-ocsinventory-agent.sh` | Instalação / atualização do **agente** em endpoints Linux / Unix |
 | `install-ocsinventory-agent.bat` | Instalação / atualização do **agente** em endpoints Windows |
+| `create-ocs-bundle.sh` | Cria um **bundle offline** com todos os componentes para instalação sem internet |
 
 ---
 
@@ -613,6 +615,7 @@ Ambos os scripts detectam a versão instalada e decidem automaticamente:
 | `--no-os-upgrade` | pergunta | NÃO atualiza o S.O. sem perguntar |
 | `--skip-snmp` | pergunta | Não instala o SNMP Scanner |
 | `--skip-agent` | pergunta | Não instala o agente neste servidor |
+| `--bundle-dir CAMINHO` | auto-detectado | Caminho do bundle offline (detectado automaticamente se `ocs-bundle/` estiver ao lado do script) |
 | `-y`, `--yes` | — | Modo não-interativo (usa padrões/flags) |
 | `-h`, `--help` | — | Mostra a ajuda |
 
@@ -663,6 +666,7 @@ Ambos os scripts detectam a versão instalada e decidem automaticamente:
 | `--tag TAG` | `3.0.0-rc1` | Tag git do agente |
 | `--base DIR` | `/opt/ocsinventory` | Diretório base de instalação |
 | `--no-service` | — | Instalar só o binário, sem serviço systemd/OpenRC |
+| `--bundle-dir CAMINHO` | auto-detectado | Caminho do bundle offline |
 | `--force` | — | Reinstalar mesmo se a versão já for a desejada |
 
 ---
@@ -946,6 +950,175 @@ O script pode ser re-executado sem risco: usuário de sistema, banco, clone git,
 - Em arquitetura multi-layer sem SSH liberado entre servidores, o resultado do `--role db` é copiado manualmente para o próximo passo. O papel `db-remote` cobre esse gap quando SSH está disponível.
 - O papel `db-remote` precisa do script em arquivo local — não funciona via `curl | bash`.
 - O papel `relay` remove o server block padrão do Nginx na porta 80. Em servidores que hospedam outros sites no Nginx, revise o `/etc/nginx/nginx.conf` e os vhosts antes de usar.
+
+---
+
+## 19. Instalação offline — Bundle
+
+Para ambientes sem acesso à internet (ou com acesso restrito via proxy), o instalador suporta um modo **bundle offline**: você baixa todos os componentes em uma máquina com internet, empacota em um único arquivo `.tar.gz` e distribui internamente.
+
+### Como funciona
+
+Ambos os scripts (`install-ocsinventory-3.0.sh` e `install-ocsinventory-agent.sh`) implementam lógica de **internet-first com fallback automático**:
+
+```
+Script inicia
+     │
+     ├─► Detecta bundle (ocs-bundle/ ao lado do script ou --bundle-dir)
+     │
+     ├─► Sonda internet: GitHub, Dart SDK, PyPI, npm, repositórios de pacotes
+     │
+     └─► Para cada componente:
+           ├─ Internet OK?              → usa internet          ✅
+           ├─ Internet falhou + bundle? → usa bundle            📦
+           └─ Nenhum dos dois?          → erro com instrução    ❌
+```
+
+Nenhuma configuração adicional é necessária — o bundle é detectado automaticamente.
+
+### Conteúdo do bundle
+
+```
+ocs-bundle/
+├── bundle.manifest              # versão, metadados
+├── repos/
+│   ├── backend.bundle           # git bundle (OCSInventory-Server-Backend-Rework)
+│   ├── frontend.bundle          # git bundle (OCSInventory-Server-Frontend-Rework)
+│   ├── snmp-scanner.bundle      # git bundle (OCSInventory-SNMP-Scanner)
+│   └── agent.bundle             # git bundle (OCSInventory-Agent-Rework)
+├── dart/
+│   ├── dart-sdk/                # Dart SDK extraído (pronto para uso)
+│   └── dartsdk-linux-x64-*.zip  # Dart SDK compactado (fallback)
+├── pip/
+│   └── *.whl                    # wheels Python (requirements do backend)
+├── npm/
+│   └── frontend-node_modules.tar.gz  # dependências npm do frontend
+└── pkgs/
+    ├── rhel/
+    │   └── *.rpm                # pacotes RPM para RHEL/AlmaLinux/Oracle
+    └── debian/
+        └── *.deb                # pacotes DEB para Debian/Ubuntu
+```
+
+### Passo 1 — Criar o bundle (máquina com internet)
+
+```bash
+chmod +x create-ocs-bundle.sh
+
+# Para ambientes RHEL/AlmaLinux/Oracle Linux
+./create-ocs-bundle.sh --rhel
+
+# Para ambientes Debian/Ubuntu
+./create-ocs-bundle.sh --debian
+
+# Para múltiplas arquiteturas (arm64)
+./create-ocs-bundle.sh --rhel --arch arm64
+
+# Flags disponíveis
+./create-ocs-bundle.sh --help
+```
+
+| Flag | Padrão | Descrição |
+|---|---|---|
+| `--tag TAG` | `3.0.0-rc1` | Tag git dos componentes |
+| `--out DIR` | `./ocs-bundle` | Diretório de saída |
+| `--arch ARCH` | `x64` | Arquitetura do Dart SDK: `x64`, `arm64`, `arm` |
+| `--rhel` | auto | Baixar pacotes RPM para RHEL/AlmaLinux/Oracle |
+| `--debian` | auto | Baixar pacotes DEB para Debian/Ubuntu |
+| `--no-npm` | — | Pular cache npm (frontend) |
+| `--no-pip` | — | Pular wheels Python |
+| `--no-pkgs` | — | Pular pacotes do sistema |
+
+O script detecta automaticamente a distro da máquina onde é executado e baixa os pacotes correspondentes.
+
+**Saída:**
+```
+ocs-bundle-3.0.0-rc1-x86_64.tar.gz  (~800MB com tudo incluso)
+```
+
+### Passo 2 — Distribuir o bundle
+
+```bash
+# Copiar para o servidor de destino
+scp ocs-bundle-3.0.0-rc1-x86_64.tar.gz root@IP_SERVIDOR:/opt/
+
+# Extrair no servidor
+ssh root@IP_SERVIDOR "tar -xzf /opt/ocs-bundle-*.tar.gz -C /opt/"
+```
+
+### Passo 3 — Instalar (detecção automática)
+
+O bundle é detectado automaticamente se estiver em um destes locais:
+- `./ocs-bundle/` (ao lado do script)
+- `../ocs-bundle/`
+- `/opt/ocs-bundle/`
+
+```bash
+# Detecção automática — o script encontra o bundle sozinho
+./install-ocsinventory-3.0.sh --role relay   --db-engine postgresql   --db-host IP_BANCO   --db-name ocsdb   --db-user ocsuser   --db-password 'SENHA'
+
+# Ou especificar explicitamente
+./install-ocsinventory-3.0.sh   --bundle-dir /opt/ocs-bundle   --role relay   --db-host IP_BANCO ...
+
+# Agente (mesma lógica)
+./install-ocsinventory-agent.sh --url http://IP_RELAY
+
+# Ou explícito
+./install-ocsinventory-agent.sh   --bundle-dir /opt/ocs-bundle   --url http://IP_RELAY
+```
+
+### Comportamento por componente
+
+| Componente | Com internet | Sem internet + bundle | Sem nenhum |
+|---|---|---|---|
+| Repositórios git | `git clone` do GitHub | Restaurado de `repos/*.bundle` | ❌ Erro |
+| Dart SDK | Download do Google | Copiado de `dart/dart-sdk/` | ❌ Erro |
+| Pip packages | `pip install` do PyPI | `pip install --no-index --find-links pip/` | Tenta internet |
+| npm packages | `npm install` | Extraído de `npm/*.tar.gz` | ❌ Erro |
+| Pacotes do sistema | `dnf`/`apt` normal | `rpm -Uvh` / `dpkg -i` de `pkgs/` | ❌ Erro |
+
+### Atualizar o bundle
+
+Quando uma nova versão do OCS for lançada, recrie o bundle com a nova tag:
+
+```bash
+./create-ocs-bundle.sh --rhel --tag 3.1.0
+# Gera: ocs-bundle-3.1.0-x86_64.tar.gz
+```
+
+### Verificar o bundle
+
+```bash
+# Ver o que está no bundle
+cat /opt/ocs-bundle/bundle.manifest
+
+# Verificar integridade dos git bundles
+git bundle verify /opt/ocs-bundle/repos/backend.bundle
+git bundle verify /opt/ocs-bundle/repos/agent.bundle
+```
+
+### Problemas comuns no modo bundle
+
+**Bundle não detectado automaticamente:**
+```bash
+# Verificar se o manifest existe
+ls /opt/ocs-bundle/bundle.manifest
+# Se não existir, extrair novamente
+tar -xzf ocs-bundle-*.tar.gz -C /opt/
+```
+
+**Dart SDK corrompido no bundle:**
+```bash
+# Testar o Dart do bundle
+/opt/ocs-bundle/dart/dart-sdk/bin/dart --version
+# Se falhar, recriar o bundle na máquina de origem
+```
+
+**Pacotes RPM com conflitos:**
+```bash
+# Instalar ignorando dependências conflitantes
+rpm -Uvh --nodeps /opt/ocs-bundle/pkgs/rhel/*.rpm
+```
 
 ---
 

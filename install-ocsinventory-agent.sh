@@ -39,6 +39,7 @@ ADMIN_PASS="PSWAgente"
 INSTALL_SERVICE=1
 FORCE_REINSTALL=0
 GIT_AGENT_URL="https://github.com/OCSInventory-NG/OCSInventory-Agent-Rework.git"
+BUNDLE_DIR=""           # caminho do bundle offline; auto-detectado se vazio
 AGENT_SERVICE_NAME="ocsinventory-agent"
 
 RED='\033[0;31m'; YEL='\033[1;33m'; GRN='\033[0;32m'; BLU='\033[0;34m'; NC='\033[0m'
@@ -57,6 +58,7 @@ while [ $# -gt 0 ]; do
     --base)       BASE_DIR="$2";    shift 2 ;;
     --no-service) INSTALL_SERVICE=0; shift ;;
     --force)      FORCE_REINSTALL=1; shift ;;
+    --bundle-dir) BUNDLE_DIR="$2"; shift 2 ;;
     *) die "Opcao desconhecida: $1  Use: --url, --tag, --base, --no-service, --force" ;;
   esac
 done
@@ -70,6 +72,127 @@ cat <<'EOF'
 =======================================================
 EOF
 
+# ---------------------------------------------------------------------------
+# BUNDLE OFFLINE — detecção automática e fallback de internet
+# ---------------------------------------------------------------------------
+
+detect_bundle() {
+  [ -n "$BUNDLE_DIR" ] && [ -f "${BUNDLE_DIR}/bundle.manifest" ] && return 0
+  for dir in "./ocs-bundle" "../ocs-bundle" "/opt/ocs-bundle" "$(dirname "$0")/ocs-bundle"; do
+    if [ -d "$dir" ] && [ -f "${dir}/bundle.manifest" ]; then
+      BUNDLE_DIR="$dir"
+      info "Bundle offline detectado: $BUNDLE_DIR"
+      return 0
+    fi
+  done
+  return 1
+}
+
+check_internet_host() {
+  timeout 5 bash -c "echo >/dev/tcp/${1}/${2:-443}" 2>/dev/null
+}
+
+INTERNET_GITHUB=0
+INTERNET_DART=0
+
+probe_internet_agent() {
+  info "Verificando conectividade de internet..."
+  check_internet_host "github.com" 443    && INTERNET_GITHUB=1 && info "  GitHub     : OK" || warn "  GitHub     : indisponivel"
+  check_internet_host "storage.googleapis.com" 443 && INTERNET_DART=1 && info "  Dart SDK   : OK" || warn "  Dart SDK   : indisponivel"
+}
+
+# Clone com fallback para bundle
+clone_agent_with_fallback() {
+  local bundle_file="${BUNDLE_DIR}/repos/agent.bundle"
+
+  if [ -d "${AGENT_SRC}/.git" ]; then
+    git config --global --add safe.directory "$AGENT_SRC" 2>/dev/null || true
+    if [ "$INTERNET_GITHUB" -eq 1 ]; then
+      info "Atualizando repositorio do agente via internet..."
+      git -C "$AGENT_SRC" fetch --tags --quiet 2>/dev/null || true
+      git -C "$AGENT_SRC" checkout "$OCS_TAG" --quiet 2>/dev/null || true
+    else
+      info "Usando repositorio existente (sem internet)."
+    fi
+    return 0
+  fi
+
+  if [ "$INTERNET_GITHUB" -eq 1 ]; then
+    info "Clonando agente via internet (tag ${OCS_TAG})..."
+    if git clone --depth 1 --branch "$OCS_TAG" "$GIT_AGENT_URL" "$AGENT_SRC" 2>/dev/null; then
+      ok "Agente clonado via internet."
+      return 0
+    fi
+    warn "Clone falhou — tentando bundle offline..."
+  fi
+
+  if [ -n "$BUNDLE_DIR" ] && [ -f "$bundle_file" ]; then
+    info "Restaurando agente do bundle offline..."
+    git clone "$bundle_file" "$AGENT_SRC" 2>/dev/null
+    git -C "$AGENT_SRC" checkout "$OCS_TAG" 2>/dev/null || true
+    ok "Agente restaurado do bundle offline."
+    return 0
+  fi
+
+  die "Nao foi possivel obter o codigo do agente: sem internet e sem bundle offline."
+}
+
+# Dart SDK com fallback para bundle
+install_dart_agent() {
+  if command -v dart >/dev/null 2>&1; then
+    info "Dart SDK ja instalado: $(dart --version 2>&1 | head -1)"
+    return 0
+  fi
+
+  local dart_arch dart_zip
+  case "$(uname -m)" in
+    aarch64|arm64) dart_arch="arm64" ;;
+    armv7*)        dart_arch="arm" ;;
+    *)             dart_arch="x64" ;;
+  esac
+
+  # Tentar via internet
+  if [ "$INTERNET_DART" -eq 1 ]; then
+    info "Baixando Dart SDK via internet..."
+    dart_zip="/tmp/dart-sdk-$$.zip"
+    if curl -fsSL --max-time 600         "https://storage.googleapis.com/dart-archive/channels/stable/release/latest/sdk/dartsdk-linux-${dart_arch}-release.zip"         -o "$dart_zip"; then
+      rm -rf /opt/dart-sdk
+      unzip -q "$dart_zip" -d /opt
+      rm -f "$dart_zip"
+      ln -sf /opt/dart-sdk/bin/dart /usr/local/bin/dart
+      ln -sf /opt/dart-sdk/bin/dartaotruntime /usr/local/bin/dartaotruntime 2>/dev/null || true
+      command -v dart >/dev/null 2>&1 && { ok "Dart SDK instalado via internet."; return 0; }
+    fi
+    warn "Download falhou — tentando bundle offline..."
+  fi
+
+  # Fallback: bundle (SDK já extraído)
+  if [ -n "$BUNDLE_DIR" ] && [ -d "${BUNDLE_DIR}/dart/dart-sdk" ]; then
+    info "Instalando Dart SDK do bundle offline..."
+    cp -r "${BUNDLE_DIR}/dart/dart-sdk" /opt/dart-sdk
+    ln -sf /opt/dart-sdk/bin/dart /usr/local/bin/dart
+    ln -sf /opt/dart-sdk/bin/dartaotruntime /usr/local/bin/dartaotruntime 2>/dev/null || true
+    command -v dart >/dev/null 2>&1 && { ok "Dart SDK instalado do bundle."; return 0; }
+  fi
+
+  # Fallback: bundle (zip)
+  if [ -n "$BUNDLE_DIR" ]; then
+    local bundle_zip
+    bundle_zip=$(find "$BUNDLE_DIR/dart" -name "dartsdk-linux-${dart_arch}-*.zip" 2>/dev/null | head -1)
+    if [ -n "$bundle_zip" ]; then
+      info "Extraindo Dart SDK do bundle (zip)..."
+      rm -rf /opt/dart-sdk
+      unzip -q "$bundle_zip" -d /opt
+      ln -sf /opt/dart-sdk/bin/dart /usr/local/bin/dart
+      ln -sf /opt/dart-sdk/bin/dartaotruntime /usr/local/bin/dartaotruntime 2>/dev/null || true
+      command -v dart >/dev/null 2>&1 && { ok "Dart SDK instalado do bundle."; return 0; }
+    fi
+  fi
+
+  die "Nao foi possivel instalar o Dart SDK: sem internet e sem bundle offline."
+}
+
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Detectar familia da distro
 # ---------------------------------------------------------------------------
@@ -610,9 +733,18 @@ verify_install() {
 # Main
 # ---------------------------------------------------------------------------
 detect_distro
+detect_bundle || true
+probe_internet_agent
+
+if [ -n "$BUNDLE_DIR" ]; then
+  info "Modo misto: internet com fallback para bundle em ${BUNDLE_DIR}"
+elif [ "$INTERNET_GITHUB" -eq 0 ] || [ "$INTERNET_DART" -eq 0 ]; then
+  warn "Sem acesso total a internet -- use --bundle-dir se tiver um bundle offline."
+fi
+
 install_base_deps
 check_and_remove
-install_dart
+install_dart_agent
 ask_backend_url
 
 info "Configuracao:"

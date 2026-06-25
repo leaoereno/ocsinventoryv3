@@ -37,6 +37,7 @@ set -Eeuo pipefail
 #############################################
 OCS_TAG="3.0.0-rc1"
 BASE_DIR="/opt/ocsinventory"
+BUNDLE_DIR=""           # caminho do bundle offline; auto-detectado se vazio
 OCS_SYS_USER="ocs"
 
 BACKEND_PORT="8000"
@@ -279,6 +280,243 @@ need_root() {
   if [ "$(id -u)" -ne 0 ]; then
     die "Execute este script como root (ex: sudo $0)."
   fi
+}
+
+#############################################
+# BUNDLE OFFLINE — detecção e fallback
+# Quando BUNDLE_DIR está definido (via flag ou
+# auto-detecção), cada etapa que normalmente
+# baixa da internet usa o bundle como fallback.
+#############################################
+
+# Detectar bundle automaticamente em locais conhecidos
+detect_bundle() {
+  [ -n "$BUNDLE_DIR" ] && [ -f "${BUNDLE_DIR}/bundle.manifest" ] && return 0
+
+  local candidates=(
+    "./ocs-bundle"
+    "../ocs-bundle"
+    "/opt/ocs-bundle"
+    "$(dirname "$0")/ocs-bundle"
+  )
+  for dir in "${candidates[@]}"; do
+    if [ -d "$dir" ] && [ -f "${dir}/bundle.manifest" ]; then
+      BUNDLE_DIR="$dir"
+      info "Bundle offline detectado em: $BUNDLE_DIR"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Testar conectividade com um host/porta (timeout 5s)
+check_internet() {
+  local host="$1" port="${2:-443}"
+  timeout 5 bash -c "echo >/dev/tcp/${host}/${port}" 2>/dev/null
+}
+
+# Verificar se internet está disponível para os serviços necessários
+INTERNET_GITHUB=0
+INTERNET_DART=0
+INTERNET_PYPI=0
+INTERNET_NPM=0
+INTERNET_PKGS=0
+
+probe_internet() {
+  info "Verificando disponibilidade de internet..."
+  check_internet "github.com" 443       && INTERNET_GITHUB=1 && info "  GitHub            : OK" || warn "  GitHub            : indisponivel"
+  check_internet "storage.googleapis.com" 443 && INTERNET_DART=1 && info "  Dart SDK (Google) : OK" || warn "  Dart SDK (Google) : indisponivel"
+  check_internet "pypi.org" 443         && INTERNET_PYPI=1  && info "  PyPI              : OK" || warn "  PyPI              : indisponivel"
+  check_internet "registry.npmjs.org" 443 && INTERNET_NPM=1 && info "  npm registry      : OK" || warn "  npm registry      : indisponivel"
+  # Pacotes do sistema: testar o repo principal
+  case "$PKG_FAMILY" in
+    rhel)
+      check_internet "yum.oracle.com" 443 2>/dev/null || \
+      check_internet "mirrors.almalinux.org" 443 2>/dev/null || \
+      check_internet "dl.fedoraproject.org" 443 2>/dev/null && \
+        INTERNET_PKGS=1 && info "  Repositórios RPM  : OK" || warn "  Repositórios RPM  : indisponivel"
+      ;;
+    debian)
+      check_internet "archive.ubuntu.com" 80 2>/dev/null || \
+      check_internet "deb.debian.org" 80 2>/dev/null && \
+        INTERNET_PKGS=1 && info "  Repositórios DEB  : OK" || warn "  Repositórios DEB  : indisponivel"
+      ;;
+    *) INTERNET_PKGS=1 ;;
+  esac
+}
+
+# Clone git com fallback para bundle
+# Uso: clone_or_bundle_checkout URL DEST TAG BUNDLE_NAME
+clone_or_bundle_checkout() {
+  local url="$1" dest="$2" tag="$3" bundle_name="$4"
+  local bundle_file="${BUNDLE_DIR}/repos/${bundle_name}.bundle"
+
+  if [ -d "${dest}/.git" ]; then
+    info "Repositório já existe em $dest."
+    if [ "$INTERNET_GITHUB" -eq 1 ]; then
+      info "  Atualizando via internet..."
+      git config --global --add safe.directory "$dest" 2>/dev/null || true
+      chown -R "$OCS_SYS_USER":"$OCS_SYS_USER" "$dest" 2>/dev/null || true
+      sudo -u "$OCS_SYS_USER" git -C "$dest" fetch --tags --quiet 2>/dev/null || true
+      sudo -u "$OCS_SYS_USER" git -C "$dest" checkout "$tag" --quiet 2>/dev/null || true
+    else
+      info "  Sem internet — usando versão atual do diretório."
+    fi
+    chown -R "$OCS_SYS_USER":"$OCS_SYS_USER" "$dest"
+    return 0
+  fi
+
+  # Tentar clone via internet
+  if [ "$INTERNET_GITHUB" -eq 1 ]; then
+    info "Clonando $bundle_name via internet (tag $tag)..."
+    if retry 3 5 sudo -u "$OCS_SYS_USER" git clone --branch "$tag" --depth 1 "$url" "$dest" 2>/dev/null; then
+      chown -R "$OCS_SYS_USER":"$OCS_SYS_USER" "$dest"
+      ok "$bundle_name clonado via internet."
+      return 0
+    fi
+    warn "Clone via internet falhou — tentando bundle offline..."
+  fi
+
+  # Fallback: restaurar do bundle
+  if [ -n "$BUNDLE_DIR" ] && [ -f "$bundle_file" ]; then
+    info "Restaurando $bundle_name do bundle offline..."
+    mkdir -p "$dest"
+    sudo -u "$OCS_SYS_USER" git clone "$bundle_file" "$dest" 2>/dev/null || \
+      git clone "$bundle_file" "$dest"
+    sudo -u "$OCS_SYS_USER" git -C "$dest" checkout "$tag" --quiet 2>/dev/null || true
+    chown -R "$OCS_SYS_USER":"$OCS_SYS_USER" "$dest"
+    ok "$bundle_name restaurado do bundle offline."
+    return 0
+  fi
+
+  die "Não foi possível obter $bundle_name: sem internet e sem bundle offline. Execute create-ocs-bundle.sh primeiro."
+}
+
+# Instalar Dart SDK com fallback para bundle
+install_dart_with_fallback() {
+  if command -v dart >/dev/null 2>&1; then
+    info "Dart SDK já instalado: $(dart --version 2>&1 | head -1)"
+    return 0
+  fi
+
+  local dart_arch dart_zip
+  case "$(uname -m)" in
+    aarch64|arm64) dart_arch="arm64" ;;
+    armv7*)        dart_arch="arm" ;;
+    *)             dart_arch="x64" ;;
+  esac
+
+  # Tentar via internet
+  if [ "$INTERNET_DART" -eq 1 ]; then
+    info "Instalando Dart SDK via internet..."
+    dart_zip="/tmp/dart-sdk-$$.zip"
+    local dart_url="https://storage.googleapis.com/dart-archive/channels/stable/release/latest/sdk/dartsdk-linux-${dart_arch}-release.zip"
+    if curl -fsSL --max-time 600 "$dart_url" -o "$dart_zip"; then
+      rm -rf /opt/dart-sdk
+      unzip -q "$dart_zip" -d /opt
+      rm -f "$dart_zip"
+      ln -sf /opt/dart-sdk/bin/dart /usr/local/bin/dart
+      ln -sf /opt/dart-sdk/bin/dartaotruntime /usr/local/bin/dartaotruntime 2>/dev/null || true
+      command -v dart >/dev/null 2>&1 && { ok "Dart SDK instalado via internet."; return 0; }
+    fi
+    warn "Download do Dart SDK falhou — tentando bundle offline..."
+  fi
+
+  # Fallback: bundle
+  if [ -n "$BUNDLE_DIR" ] && [ -d "${BUNDLE_DIR}/dart/dart-sdk" ]; then
+    info "Instalando Dart SDK do bundle offline..."
+    cp -r "${BUNDLE_DIR}/dart/dart-sdk" /opt/dart-sdk
+    ln -sf /opt/dart-sdk/bin/dart /usr/local/bin/dart
+    ln -sf /opt/dart-sdk/bin/dartaotruntime /usr/local/bin/dartaotruntime 2>/dev/null || true
+    command -v dart >/dev/null 2>&1 && { ok "Dart SDK instalado do bundle offline."; return 0; }
+  fi
+
+  # Fallback: zip no bundle
+  if [ -n "$BUNDLE_DIR" ]; then
+    local bundle_zip
+    bundle_zip=$(find "$BUNDLE_DIR/dart" -name "dartsdk-linux-${dart_arch}-*.zip" 2>/dev/null | head -1)
+    if [ -n "$bundle_zip" ]; then
+      info "Extraindo Dart SDK do bundle (zip)..."
+      rm -rf /opt/dart-sdk
+      unzip -q "$bundle_zip" -d /opt
+      ln -sf /opt/dart-sdk/bin/dart /usr/local/bin/dart
+      ln -sf /opt/dart-sdk/bin/dartaotruntime /usr/local/bin/dartaotruntime 2>/dev/null || true
+      command -v dart >/dev/null 2>&1 && { ok "Dart SDK instalado do bundle offline."; return 0; }
+    fi
+  fi
+
+  die "Não foi possível instalar o Dart SDK: sem internet e sem bundle offline."
+}
+
+# Instalar pacotes Python com fallback para wheels do bundle
+pip_install_with_fallback() {
+  local venv_pip="$1"; shift
+  local requirements=("$@")
+
+  if [ "$INTERNET_PYPI" -eq 1 ]; then
+    # Tentar via internet primeiro
+    if "$venv_pip" install "${requirements[@]}" 2>/dev/null; then
+      return 0
+    fi
+    warn "pip install via internet falhou — tentando wheels do bundle..."
+  fi
+
+  # Fallback: wheels locais
+  if [ -n "$BUNDLE_DIR" ] && [ -d "${BUNDLE_DIR}/pip" ] && \
+     ls "${BUNDLE_DIR}/pip/"*.whl 2>/dev/null | grep -q .; then
+    info "Instalando via wheels do bundle offline..."
+    "$venv_pip" install --no-index --find-links="${BUNDLE_DIR}/pip" "${requirements[@]}" 2>/dev/null || \
+    "$venv_pip" install "${requirements[@]}"  # último recurso: internet
+    return $?
+  fi
+
+  # Sem bundle — tentar internet mesmo assim
+  "$venv_pip" install "${requirements[@]}"
+}
+
+# npm install com fallback para cache do bundle
+npm_install_with_fallback() {
+  local dest_dir="$1"
+
+  if [ -n "$BUNDLE_DIR" ] && [ -f "${BUNDLE_DIR}/npm/frontend-node_modules.tar.gz" ]; then
+    info "Restaurando node_modules do bundle offline..."
+    tar -xzf "${BUNDLE_DIR}/npm/frontend-node_modules.tar.gz" -C "$dest_dir"
+    ok "node_modules restaurado do bundle."
+    return 0
+  fi
+
+  if [ "$INTERNET_NPM" -eq 1 ]; then
+    info "Instalando dependências npm via internet..."
+    (cd "$dest_dir" && sudo -u "$OCS_SYS_USER" npm install)
+    return $?
+  fi
+
+  die "Não foi possível instalar dependências npm: sem internet e sem bundle offline."
+}
+
+# pkg_install com fallback para pacotes locais do bundle
+pkg_install_from_bundle() {
+  local pkgs=("$@")
+  local bundle_pkgs_dir="${BUNDLE_DIR}/pkgs"
+
+  case "$PKG_FAMILY" in
+    rhel)
+      local rpms_dir="${bundle_pkgs_dir}/rhel"
+      if [ -d "$rpms_dir" ] && ls "$rpms_dir/"*.rpm 2>/dev/null | grep -q .; then
+        info "Instalando RPMs do bundle offline..."
+        dnf install -y "$rpms_dir/"*.rpm 2>/dev/null || \
+        rpm -Uvh --nodeps "$rpms_dir/"*.rpm 2>/dev/null || true
+      fi
+      ;;
+    debian)
+      local debs_dir="${bundle_pkgs_dir}/debian"
+      if [ -d "$debs_dir" ] && ls "$debs_dir/"*.deb 2>/dev/null | grep -q .; then
+        info "Instalando DEBs do bundle offline..."
+        dpkg -i "$debs_dir/"*.deb 2>/dev/null || true
+        apt-get install -f -y 2>/dev/null || true
+      fi
+      ;;
+  esac
 }
 
 detect_os() {
@@ -1881,6 +2119,7 @@ EOF
 
   nginx_disable_ipv6_if_needed
   nginx -t || die "Configuracao do Nginx para o relay esta invalida."
+  systemctl enable nginx 2>/dev/null || true
   systemctl reload nginx 2>/dev/null || systemctl restart nginx
 
   if ! wait_for_http "http://127.0.0.1:${RELAY_PORT}/api-check/" 30; then
@@ -1935,7 +2174,7 @@ install_backend() {
       fi
       ;;
   esac
-  clone_or_checkout "$GIT_BACKEND_URL" "$BASE_DIR/backend" "$OCS_TAG"
+  clone_or_bundle_checkout "$GIT_BACKEND_URL" "$BASE_DIR/backend" "$OCS_TAG" "backend"
 
   if [ ! -d "$BASE_DIR/backend/venv" ]; then
     sudo -u "$OCS_SYS_USER" "$PYTHON_BIN" -m venv "$BASE_DIR/backend/venv"
@@ -2115,6 +2354,7 @@ EOF
 
   nginx_disable_ipv6_if_needed
   nginx -t || die "Configuracao do Nginx para o backend esta invalida."
+  systemctl enable nginx 2>/dev/null || true
   systemctl reload nginx 2>/dev/null || systemctl restart nginx
 
   if ! wait_for_http "http://127.0.0.1:${BACKEND_PORT}/api-check/" 30; then
@@ -2156,7 +2396,7 @@ EOF
 #############################################
 install_frontend() {
   ensure_node20
-  clone_or_checkout "$GIT_FRONTEND_URL" "$BASE_DIR/frontend" "$OCS_TAG"
+  clone_or_bundle_checkout "$GIT_FRONTEND_URL" "$BASE_DIR/frontend" "$OCS_TAG" "frontend"
   (cd "$BASE_DIR/frontend" && sudo -u "$OCS_SYS_USER" npm install)
 }
 
@@ -2222,6 +2462,7 @@ EOF
 
   nginx_disable_ipv6_if_needed
   nginx -t || die "Configuracao do Nginx para o frontend esta invalida."
+  systemctl enable nginx 2>/dev/null || true
   systemctl reload nginx 2>/dev/null || systemctl restart nginx
 
   if ! wait_for_http "http://127.0.0.1:${FRONTEND_PORT}/" 30; then
@@ -2238,7 +2479,7 @@ install_and_configure_snmp() {
     return 0
   fi
 
-  clone_or_checkout "$GIT_SNMP_URL" "$BASE_DIR/snmp-scanner" "$OCS_TAG"
+  clone_or_bundle_checkout "$GIT_SNMP_URL" "$BASE_DIR/snmp-scanner" "$OCS_TAG" "snmp-scanner"
 
   if [ ! -d "$BASE_DIR/snmp-scanner/venv" ]; then
     sudo -u "$OCS_SYS_USER" "$PYTHON_BIN" -m venv "$BASE_DIR/snmp-scanner/venv"
@@ -2318,10 +2559,10 @@ install_agent() {
     return 0
   fi
 
-  ensure_dart
+  install_dart_with_fallback
 
   local agent_src="$BASE_DIR/agent-src"
-  clone_or_checkout "$GIT_AGENT_URL" "$agent_src" "$OCS_TAG"
+  clone_or_bundle_checkout "$GIT_AGENT_URL" "$agent_src" "$OCS_TAG" "agent"
 
   (cd "$agent_src" && dart pub get && dart compile exe lib/app/app.dart -o ocsinventory-cli)
   cp "$agent_src/ocsinventory-cli" "$agent_src/setup/linux/"
@@ -2793,6 +3034,18 @@ main() {
   ask_role_if_needed
   set_db_engine_default
   pick_server_ip
+
+  # Detectar bundle offline e sondar internet antes de qualquer instalação
+  detect_bundle || true
+  probe_internet
+
+  if [ -n "$BUNDLE_DIR" ]; then
+    info "Modo misto ativo: internet com fallback para bundle em '$BUNDLE_DIR'"
+  elif [ "$INTERNET_GITHUB" -eq 0 ] || [ "$INTERNET_DART" -eq 0 ]; then
+    warn "Sem acesso total à internet e nenhum bundle offline encontrado."
+    warn "Para criar um bundle: ./create-ocs-bundle.sh"
+    warn "Para usar um bundle: --bundle-dir /caminho/do/bundle"
+  fi
 
   # Gerar senhas que faltam
   if [ "$ROLE" = "standalone" ] && [ -z "$DB_PASSWORD" ]; then
