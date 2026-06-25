@@ -45,9 +45,10 @@ AGENT_TAG=""            # tag de identificação do ativo no console (ex.: ITSM-
 AGENT_SERVICE_NAME="ocsinventory-agent"
 
 RED='\033[0;31m'; YEL='\033[1;33m'; GRN='\033[0;32m'; BLU='\033[0;34m'; NC='\033[0m'
-info()    { printf "\${GRN}[INFO]\${NC}   %s\n" "$*"; echo "[INFO]  $*" >> "\${INSTALL_LOG}" 2>/dev/null || true; }
-warn()    { printf "\${YEL}[AVISO]\${NC}  %s\n" "$*" >&2; echo "[AVISO] $*" >> "\${INSTALL_LOG}" 2>/dev/null || true; }
-die()     { printf "\${RED}[ERRO]\${NC}   %s\n" "$*" >&2; echo "[ERRO]  $*" >> "\${INSTALL_LOG}" 2>/dev/null || true; exit 1; }
+info()    { printf "${GRN}[INFO]${NC}   %s\n" "$*"; echo "[INFO]  $*" >> "${INSTALL_LOG}" 2>/dev/null || true; }
+warn()    { printf "${YEL}[AVISO]${NC}  %s\n" "$*" >&2; echo "[AVISO] $*" >> "${INSTALL_LOG}" 2>/dev/null || true; }
+die()     { printf "${RED}[ERRO]${NC}   %s\n" "$*" >&2; echo "[ERRO]  $*" >> "${INSTALL_LOG}" 2>/dev/null || true; exit 1; }
+ok()      { printf "${GRN}  ✓${NC} %s\n" "$*"; echo "[OK]    $*" >> "${INSTALL_LOG}" 2>/dev/null || true; }
 section() { printf "\n${BLU}>>> %s${NC}\n" "$*"; }
 
 # ---------------------------------------------------------------------------
@@ -238,7 +239,7 @@ show_network_info() {
       color="${RED}"
     fi
 
-    printf "  [%2s] %-22s %-22s ${color}%s${NC}\n" "$num" "$ip" "$desc" "$status"
+    printf "  [%2s] %-22s %-22s %b%s%b\n" "$num" "$ip" "$desc" "$color" "$status" "$NC"
   done
 
   echo ""
@@ -264,9 +265,9 @@ test_agent_report() {
   # 1. Testar conectividade TCP
   info "1. Testando conectividade TCP com ${relay_ip}:${relay_port}..."
   if timeout 3 bash -c "echo >/dev/tcp/${relay_ip}/${relay_port}" 2>/dev/null; then
-    info "   TCP ${relay_ip}:${relay_port} → ${GRN}ABERTA${NC}"
+    printf "${GRN}[INFO]${NC}   TCP %s:%s → ${GRN}ABERTA${NC}\n" "$relay_ip" "$relay_port"
   else
-    warn "   TCP ${relay_ip}:${relay_port} → ${RED}BLOQUEADA${NC}"
+    printf "${RED}[AVISO]${NC} TCP %s:%s → ${RED}BLOQUEADA${NC}\n" "$relay_ip" "$relay_port" >&2
     warn "   O agente nao consegue alcancara o relay. Verifique Guardicore/firewall."
     return 1
   fi
@@ -276,9 +277,9 @@ test_agent_report() {
   local api_resp
   api_resp=$(curl --noproxy '*' -fsS --max-time 5     "http://${relay_ip}:${relay_port}/api-check/" 2>/dev/null || true)
   if echo "$api_resp" | grep -q "API is online"; then
-    info "   API /api-check/ → ${GRN}OK${NC} (${api_resp})"
+    printf "${GRN}[INFO]${NC}   API /api-check/ → ${GRN}OK${NC} (%s)\n" "$api_resp"
   else
-    warn "   API /api-check/ → ${YEL}sem resposta esperada${NC} (resp: ${api_resp:-vazia})"
+    printf "${YEL}[AVISO]${NC} API /api-check/ → ${YEL}sem resposta esperada${NC} (resp: %s)\n" "${api_resp:-vazia}" >&2
   fi
 
   # 3. Testar autenticacao
@@ -286,9 +287,9 @@ test_agent_report() {
   local token_resp
   token_resp=$(curl --noproxy '*' -fsS --max-time 5     -X POST "http://${relay_ip}:${relay_port}/api-auth/token"     -H "Content-Type: application/json"     -d "{"username":"${ADMIN_USER}","password":"${ADMIN_PASS}"}" 2>/dev/null || true)
   if echo "$token_resp" | grep -q '"token"'; then
-    info "   Autenticacao → ${GRN}OK${NC} (token obtido)"
+    printf "${GRN}[INFO]${NC}   Autenticacao → ${GRN}OK${NC} (token obtido)\n"
   else
-    warn "   Autenticacao → ${RED}FALHOU${NC} (resp: ${token_resp:-vazia})"
+    printf "${RED}[AVISO]${NC} Autenticacao → ${RED}FALHOU${NC} (resp: %s)\n" "${token_resp:-vazia}" >&2
     warn "   Verifique se o usuario '${ADMIN_USER}' existe e tem permissao no backend."
     return 1
   fi
@@ -299,15 +300,15 @@ test_agent_report() {
     ocsinventory-cli       --url "$BACKEND_URL"       --username "$ADMIN_USER"       --password "$ADMIN_PASS"       --mode 1       --log_level 3       --log_file true       --log_file_path "$test_log" 2>/dev/null || true
 
     if grep -q "Inventory created\|Inventory updated\|completed successfully" "$test_log" 2>/dev/null; then
-      info "   Inventario → ${GRN}ENVIADO COM SUCESSO${NC}"
+      printf "${GRN}[INFO]${NC}   Inventario → ${GRN}ENVIADO COM SUCESSO${NC}\n"
       grep -E "created|updated|successfully" "$test_log" | tail -3 | while read -r line; do
         info "   $line"
       done
     elif grep -q "API is not available\|No route to host\|Connection refused" "$test_log" 2>/dev/null; then
-      warn "   Inventario → ${RED}FALHOU${NC} (sem rota para o relay)"
+      printf "${RED}[AVISO]${NC} Inventario → ${RED}FALHOU${NC} (sem rota para o relay)\n" >&2
       warn "   Verifique conectividade TCP e regras de firewall."
     else
-      warn "   Inventario → ${YEL}resultado inconclusivo${NC} -- veja: $test_log"
+      printf "${YEL}[AVISO]${NC} Inventario → ${YEL}resultado inconclusivo${NC} -- veja: %s\n" "$test_log" >&2
     fi
   else
     warn "   Binario ocsinventory-cli nao encontrado no PATH."
